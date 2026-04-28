@@ -1,0 +1,307 @@
+#!/usr/bin/env bash
+# contain — a thin wrapper around `tart` for macOS-on-macOS isolated environments.
+#
+# Workflow:
+#   contain pull               # fetch the upstream base image (one-time, ~30GB)
+#   contain up dev             # clone base -> "dev" and boot it
+#   contain ssh dev            # admin/admin
+#   contain snapshot dev gold  # APFS-clone "dev" into "gold" as your golden image
+#   contain base gold          # tell contain to clone from "gold" going forward
+#   contain reset dev          # nuke "dev" and reclone fresh from the configured base
+#   contain down dev           # stop
+#   contain rm dev             # delete
+
+set -euo pipefail
+
+UPSTREAM_BASE="ghcr.io/cirruslabs/macos-sequoia-base:latest"
+CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/contain"
+BASE_FILE="$CONFIG_DIR/base"
+SPEC_DIR="$CONFIG_DIR/specs"
+SSH_USER="admin"
+SSH_PASS="admin"
+
+mkdir -p "$CONFIG_DIR" "$SPEC_DIR"
+
+spec_file() { echo "$SPEC_DIR/$1.conf"; }
+
+# Read one key from a spec file. Lines look like `cpu=8`. Blank lines and
+# `# comments` are ignored. Returns empty string if missing.
+spec_get() {
+  local file="$1" key="$2"
+  [[ -f "$file" ]] || return 0
+  awk -F= -v k="$key" '
+    /^[[:space:]]*#/ { next }
+    /^[[:space:]]*$/ { next }
+    {
+      gsub(/[[:space:]]/, "", $1)
+      if ($1 == k) {
+        sub(/^[^=]*=/, "")
+        sub(/^[[:space:]]+/, ""); sub(/[[:space:]]+$/, "")
+        print; exit
+      }
+    }' "$file"
+}
+
+# Apply the spec file for $1 to the VM via `tart set`. VM must be stopped.
+apply_spec() {
+  local name="$1" file; file="$(spec_file "$name")"
+  [[ -f "$file" ]] || return 0
+  if vm_running "$name"; then
+    echo "warning: $name is running — spec will apply on next stop/start" >&2
+    return 0
+  fi
+  local cpu mem disp disk args=()
+  cpu="$(spec_get "$file" cpu)"
+  mem="$(spec_get "$file" memory)"
+  disp="$(spec_get "$file" display)"
+  disk="$(spec_get "$file" disk)"
+  [[ -n "$cpu"  ]] && args+=(--cpu "$cpu")
+  [[ -n "$mem"  ]] && args+=(--memory "$mem")
+  [[ -n "$disp" ]] && args+=(--display "$disp")
+  [[ -n "$disk" ]] && args+=(--disk-size "$disk")
+  if (( ${#args[@]} > 0 )); then
+    echo "applying spec $(basename "$file") -> $name: ${args[*]}"
+    tart set "$name" "${args[@]}"
+  fi
+}
+
+current_base() {
+  if [[ -f "$BASE_FILE" ]]; then cat "$BASE_FILE"; else echo "$UPSTREAM_BASE"; fi
+}
+
+vm_exists() {
+  tart list --quiet --source local 2>/dev/null | grep -Fxq "$1"
+}
+
+vm_running() {
+  tart list 2>/dev/null \
+    | awk -v n="$1" '$1=="local" && $2==n && $NF=="running" { f=1 } END { exit !f }'
+}
+
+require_name() {
+  if [[ -z "${1:-}" ]]; then echo "error: VM name required" >&2; exit 2; fi
+}
+
+ensure_sshpass() {
+  command -v sshpass >/dev/null || {
+    echo "installing sshpass (needed for non-interactive ssh)..." >&2
+    brew install esolitos/ipa/sshpass >/dev/null
+  }
+}
+
+cmd_pull() {
+  local img="${1:-$UPSTREAM_BASE}"
+  echo "pulling $img ..."
+  tart pull "$img"
+  echo "ok. configured base is: $(current_base)"
+}
+
+cmd_base() {
+  if [[ -z "${1:-}" ]]; then
+    echo "$(current_base)"
+    return
+  fi
+  echo "$1" > "$BASE_FILE"
+  echo "base image set to: $1"
+}
+
+cmd_list() {
+  tart list
+}
+
+ensure_clone() {
+  local name="$1" base; base="$(current_base)"
+  if ! vm_exists "$name"; then
+    echo "cloning $base -> $name ..."
+    tart clone "$base" "$name"
+  fi
+  apply_spec "$name"
+}
+
+cmd_up() {
+  require_name "${1:-}"
+  local name="$1"
+  ensure_clone "$name"
+  if vm_running "$name"; then
+    echo "$name already running"; return
+  fi
+  echo "booting $name (headless) ..."
+  nohup tart run --no-graphics "$name" </dev/null >/tmp/contain-"$name".log 2>&1 &
+  disown || true
+  sleep 1
+  echo "started. log: /tmp/contain-$name.log"
+}
+
+cmd_open() {
+  require_name "${1:-}"
+  local name="$1"
+  ensure_clone "$name"
+  if vm_running "$name"; then
+    echo "$name already running — stopping so it can be re-opened with a window"
+    tart stop "$name" >/dev/null 2>&1 || true
+    sleep 2
+  fi
+  local log="/tmp/contain-$name.log"
+  : > "$log"
+  echo "starting $name with VNC ..."
+  nohup tart run --vnc-experimental "$name" </dev/null >"$log" 2>&1 &
+  disown || true
+  # wait for tart to print the vnc:// URL (tart already calls `open` on it,
+  # but we re-`open` to be sure Screen Sharing.app comes to the front)
+  for _ in $(seq 1 30); do
+    if grep -q "vnc://" "$log"; then
+      local url; url="$(grep -oE 'vnc://[^[:space:]]+' "$log" | head -1 | sed 's/\.\.\.$//')"
+      echo "opening $url in Screen Sharing"
+      open "$url"
+      return
+    fi
+    sleep 1
+  done
+  echo "warning: tart didn't print a vnc URL within 30s — see $log"
+  return 1
+}
+
+cmd_down() {
+  require_name "${1:-}"
+  tart stop "$1"
+}
+
+cmd_rm() {
+  require_name "${1:-}"
+  if vm_running "$1"; then tart stop "$1" || true; fi
+  tart delete "$1"
+}
+
+cmd_reset() {
+  require_name "${1:-}"
+  local name="$1"
+  if vm_exists "$name"; then cmd_rm "$name"; fi
+  cmd_up "$name"
+}
+
+cmd_snapshot() {
+  require_name "${1:-}"
+  require_name "${2:-}"
+  local from="$1" to="$2"
+  if vm_running "$from"; then
+    echo "stopping $from before snapshot ..."
+    tart stop "$from"
+  fi
+  tart clone "$from" "$to"
+  echo "snapshotted $from -> $to"
+}
+
+cmd_clone() {
+  cmd_snapshot "$@"
+}
+
+cmd_ip() {
+  require_name "${1:-}"
+  tart ip "$1"
+}
+
+cmd_ssh() {
+  require_name "${1:-}"
+  local name="$1"; shift || true
+  ensure_sshpass
+  local ip; ip="$(tart ip "$name" --wait 30)"
+  sshpass -p "$SSH_PASS" ssh \
+    -o StrictHostKeyChecking=no \
+    -o UserKnownHostsFile=/dev/null \
+    -o LogLevel=ERROR \
+    "$SSH_USER@$ip" "$@"
+}
+
+cmd_spec() {
+  require_name "${1:-}"
+  local name="$1" file; file="$(spec_file "$name")"
+  shift
+  if (( $# == 0 )); then
+    echo "# spec: $file"
+    if [[ -f "$file" ]]; then cat "$file"; else echo "(none — VM uses tart defaults)"; fi
+    if vm_exists "$name"; then
+      echo
+      echo "# live config from tart get:"
+      tart get "$name"
+    fi
+    return
+  fi
+  if [[ "$1" == "edit" ]]; then
+    : > /dev/null
+    "${EDITOR:-vi}" "$file"
+    return
+  fi
+  if [[ "$1" == "clear" ]]; then
+    rm -f "$file"; echo "removed $file"; return
+  fi
+  # k=v pairs: write/replace each in the spec file
+  for kv in "$@"; do
+    [[ "$kv" == *=* ]] || { echo "expected key=value, got: $kv" >&2; exit 2; }
+    local k="${kv%%=*}" v="${kv#*=}"
+    case "$k" in
+      cpu|memory|display|disk) ;;
+      *) echo "unknown key '$k' (allowed: cpu memory display disk)" >&2; exit 2 ;;
+    esac
+    touch "$file"
+    if grep -qE "^[[:space:]]*$k[[:space:]]*=" "$file"; then
+      # macOS sed needs an empty backup arg
+      sed -i '' -E "s|^[[:space:]]*$k[[:space:]]*=.*|$k=$v|" "$file"
+    else
+      printf '%s=%s\n' "$k" "$v" >> "$file"
+    fi
+  done
+  echo "spec updated: $file"
+  if vm_exists "$name" && ! vm_running "$name"; then apply_spec "$name"; fi
+}
+
+cmd_status() {
+  echo "configured base: $(current_base)"
+  echo
+  tart list
+}
+
+usage() {
+  cat <<'EOF'
+contain — programmatic macOS-on-macOS environments via tart
+
+  contain pull [image]           pull base image (default: cirruslabs sequoia)
+  contain base [image]           show or set the base image used for `up`
+  contain list                   list all VMs and their status
+  contain status                 show base + list
+  contain up <name>              clone base -> name (if missing) and boot
+  contain down <name>            stop a VM
+  contain reset <name>           delete and recreate from base
+  contain rm <name>              delete a VM
+  contain snapshot <from> <to>   APFS-clone a VM (also: `clone`)
+  contain ip <name>              print VM IP
+  contain ssh <name> [cmd...]    ssh in (admin/admin)
+  contain open <name>            boot if needed and bring GUI window to front
+  contain spec <name>            show spec + live config
+  contain spec <name> k=v ...    set keys (cpu memory display disk); applies if stopped
+  contain spec <name> edit       open spec file in $EDITOR
+  contain spec <name> clear      remove the spec file
+EOF
+}
+
+main() {
+  local cmd="${1:-}"; shift || true
+  case "$cmd" in
+    pull)     cmd_pull "$@" ;;
+    base)     cmd_base "$@" ;;
+    list|ls)  cmd_list ;;
+    status)   cmd_status ;;
+    up|start) cmd_up "$@" ;;
+    down|stop)cmd_down "$@" ;;
+    reset)    cmd_reset "$@" ;;
+    rm|delete)cmd_rm "$@" ;;
+    snapshot|clone) cmd_snapshot "$@" ;;
+    ip)       cmd_ip "$@" ;;
+    ssh|shell)cmd_ssh "$@" ;;
+    open|gui) cmd_open "$@" ;;
+    spec)     cmd_spec "$@" ;;
+    ""|-h|--help|help) usage ;;
+    *) echo "unknown: $cmd" >&2; usage; exit 2 ;;
+  esac
+}
+
+main "$@"
