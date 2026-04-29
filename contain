@@ -13,7 +13,7 @@
 
 set -euo pipefail
 
-UPSTREAM_BASE="ghcr.io/cirruslabs/macos-sequoia-base:latest"
+UPSTREAM_BASE="ghcr.io/cirruslabs/macos-tahoe-base:latest"
 CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/contain"
 BASE_FILE="$CONFIG_DIR/base"
 SPEC_DIR="$CONFIG_DIR/specs"
@@ -264,7 +264,7 @@ usage() {
   cat <<'EOF'
 contain — programmatic macOS-on-macOS environments via tart
 
-  contain pull [image]           pull base image (default: cirruslabs sequoia)
+  contain pull [image]           pull base image (default: cirruslabs tahoe)
   contain base [image]           show or set the base image used for `up`
   contain list                   list all VMs and their status
   contain status                 show base + list
