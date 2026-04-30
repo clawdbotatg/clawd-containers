@@ -13,6 +13,17 @@
 
 set -euo pipefail
 
+# Resolve the directory this script lives in, following symlinks (so
+# `./contain` and the /usr/local/bin/contain symlink both find provision.sh).
+self="${BASH_SOURCE[0]}"
+while [[ -L "$self" ]]; do
+  link="$(readlink "$self")"
+  if [[ "$link" = /* ]]; then self="$link"
+  else self="$(cd "$(dirname "$self")" && pwd)/$(basename "$link")"
+  fi
+done
+SCRIPT_DIR="$(cd "$(dirname "$self")" && pwd)"
+
 UPSTREAM_BASE="ghcr.io/cirruslabs/macos-tahoe-base:latest"
 CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/contain"
 BASE_FILE="$CONFIG_DIR/base"
@@ -212,6 +223,51 @@ cmd_ssh() {
     "$SSH_USER@$ip" "$@"
 }
 
+# Boot the VM if needed, scp a script in, and run it. Default script is
+# $SCRIPT_DIR/provision.sh; pass an explicit path to override.
+cmd_provision() {
+  require_name "${1:-}"
+  local name="$1" script
+  script="${2:-$SCRIPT_DIR/provision.sh}"
+  if [[ ! -f "$script" ]]; then
+    echo "error: no provision script at $script" >&2; exit 2
+  fi
+
+  if ! vm_running "$name"; then
+    cmd_up "$name"
+  fi
+
+  ensure_sshpass
+  local ip; ip="$(tart ip "$name" --wait 60)"
+
+  echo "==> waiting for ssh on $name ($ip) ..."
+  for _ in $(seq 1 30); do
+    if sshpass -p "$SSH_PASS" ssh \
+        -o StrictHostKeyChecking=no \
+        -o UserKnownHostsFile=/dev/null \
+        -o LogLevel=ERROR \
+        -o ConnectTimeout=2 \
+        "$SSH_USER@$ip" true 2>/dev/null; then
+      break
+    fi
+    sleep 2
+  done
+
+  echo "==> copying $(basename "$script") -> $name:/tmp/contain-provision.sh ..."
+  sshpass -p "$SSH_PASS" scp \
+    -o StrictHostKeyChecking=no \
+    -o UserKnownHostsFile=/dev/null \
+    -o LogLevel=ERROR \
+    "$script" "$SSH_USER@$ip:/tmp/contain-provision.sh"
+
+  echo "==> running provision script in $name ..."
+  sshpass -p "$SSH_PASS" ssh \
+    -o StrictHostKeyChecking=no \
+    -o UserKnownHostsFile=/dev/null \
+    -o LogLevel=ERROR \
+    "$SSH_USER@$ip" "bash /tmp/contain-provision.sh"
+}
+
 cmd_spec() {
   require_name "${1:-}"
   local name="$1" file; file="$(spec_file "$name")"
@@ -276,6 +332,7 @@ contain — programmatic macOS-on-macOS environments via tart
   contain ip <name>              print VM IP
   contain ssh <name> [cmd...]    ssh in (admin/admin)
   contain open <name>            boot if needed and bring GUI window to front
+  contain provision <name> [s]   boot if needed, scp script in, run it (default: ./provision.sh)
   contain spec <name>            show spec + live config
   contain spec <name> k=v ...    set keys (cpu memory display disk); applies if stopped
   contain spec <name> edit       open spec file in $EDITOR
@@ -298,6 +355,7 @@ main() {
     ip)       cmd_ip "$@" ;;
     ssh|shell)cmd_ssh "$@" ;;
     open|gui) cmd_open "$@" ;;
+    provision)cmd_provision "$@" ;;
     spec)     cmd_spec "$@" ;;
     ""|-h|--help|help) usage ;;
     *) echo "unknown: $cmd" >&2; usage; exit 2 ;;
