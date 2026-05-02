@@ -1,20 +1,20 @@
 #!/usr/bin/env bash
-# contain — a thin wrapper around `tart` for macOS-on-macOS isolated environments.
+# cont — a thin wrapper around `tart` for macOS-on-macOS isolated environments.
 #
 # Workflow:
-#   contain pull               # fetch the upstream base image (one-time, ~30GB)
-#   contain up dev             # clone base -> "dev" and boot it
-#   contain ssh dev            # admin/admin
-#   contain snapshot dev gold  # APFS-clone "dev" into "gold" as your golden image
-#   contain base gold          # tell contain to clone from "gold" going forward
-#   contain reset dev          # nuke "dev" and reclone fresh from the configured base
-#   contain down dev           # stop
-#   contain rm dev             # delete
+#   cont pull               # fetch the upstream base image (one-time, ~30GB)
+#   cont up dev             # clone base -> "dev" and boot it
+#   cont ssh dev            # admin/admin
+#   cont snapshot dev gold  # APFS-clone "dev" into "gold" as your golden image
+#   cont base gold          # tell cont to clone from "gold" going forward
+#   cont reset dev          # nuke "dev" and reclone fresh from the configured base
+#   cont down dev           # stop
+#   cont rm dev             # delete
 
 set -euo pipefail
 
 # Resolve the directory this script lives in, following symlinks (so
-# `./contain` and the /usr/local/bin/contain symlink both find provision.sh).
+# `./cont` and the /usr/local/bin/cont symlink both find provision.sh).
 self="${BASH_SOURCE[0]}"
 while [[ -L "$self" ]]; do
   link="$(readlink "$self")"
@@ -25,7 +25,7 @@ done
 SCRIPT_DIR="$(cd "$(dirname "$self")" && pwd)"
 
 UPSTREAM_BASE="ghcr.io/cirruslabs/macos-tahoe-base:latest"
-CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/contain"
+CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/cont"
 BASE_FILE="$CONFIG_DIR/base"
 SPEC_DIR="$CONFIG_DIR/specs"
 SSH_USER="admin"
@@ -137,10 +137,10 @@ cmd_up() {
     echo "$name already running"; return
   fi
   echo "booting $name (headless) ..."
-  nohup tart run --no-graphics "$name" </dev/null >/tmp/contain-"$name".log 2>&1 &
+  nohup tart run --no-graphics "$name" </dev/null >/tmp/cont-"$name".log 2>&1 &
   disown || true
   sleep 1
-  echo "started. log: /tmp/contain-$name.log"
+  echo "started. log: /tmp/cont-$name.log"
 }
 
 cmd_open() {
@@ -152,7 +152,7 @@ cmd_open() {
     tart stop "$name" >/dev/null 2>&1 || true
     sleep 2
   fi
-  local log="/tmp/contain-$name.log"
+  local log="/tmp/cont-$name.log"
   : > "$log"
   echo "starting $name with VNC ..."
   nohup tart run --vnc-experimental "$name" </dev/null >"$log" 2>&1 &
@@ -253,19 +253,19 @@ cmd_provision() {
     sleep 2
   done
 
-  echo "==> copying $(basename "$script") -> $name:/tmp/contain-provision.sh ..."
+  echo "==> copying $(basename "$script") -> $name:/tmp/cont-provision.sh ..."
   sshpass -p "$SSH_PASS" scp \
     -o StrictHostKeyChecking=no \
     -o UserKnownHostsFile=/dev/null \
     -o LogLevel=ERROR \
-    "$script" "$SSH_USER@$ip:/tmp/contain-provision.sh"
+    "$script" "$SSH_USER@$ip:/tmp/cont-provision.sh"
 
   echo "==> running provision script in $name ..."
   sshpass -p "$SSH_PASS" ssh \
     -o StrictHostKeyChecking=no \
     -o UserKnownHostsFile=/dev/null \
     -o LogLevel=ERROR \
-    "$SSH_USER@$ip" "bash /tmp/contain-provision.sh"
+    "$SSH_USER@$ip" "bash /tmp/cont-provision.sh"
 }
 
 cmd_spec() {
@@ -318,25 +318,25 @@ cmd_status() {
 
 usage() {
   cat <<'EOF'
-contain — programmatic macOS-on-macOS environments via tart
+cont — programmatic macOS-on-macOS environments via tart
 
-  contain pull [image]           pull base image (default: cirruslabs tahoe)
-  contain base [image]           show or set the base image used for `up`
-  contain list                   list all VMs and their status
-  contain status                 show base + list
-  contain up <name>              clone base -> name (if missing) and boot
-  contain down <name>            stop a VM
-  contain reset <name>           delete and recreate from base
-  contain rm <name>              delete a VM
-  contain snapshot <from> <to>   APFS-clone a VM (also: `clone`)
-  contain ip <name>              print VM IP
-  contain ssh <name> [cmd...]    ssh in (admin/admin)
-  contain open <name>            boot if needed and bring GUI window to front
-  contain provision <name> [s]   boot if needed, scp script in, run it (default: ./provision.sh)
-  contain spec <name>            show spec + live config
-  contain spec <name> k=v ...    set keys (cpu memory display disk); applies if stopped
-  contain spec <name> edit       open spec file in $EDITOR
-  contain spec <name> clear      remove the spec file
+  cont pull [image]           pull base image (default: cirruslabs tahoe)
+  cont base [image]           show or set the base image used for `up`
+  cont list                   list all VMs and their status
+  cont status                 show base + list
+  cont up <name>              clone base -> name (if missing) and boot
+  cont down <name>            stop a VM
+  cont reset <name>           delete and recreate from base
+  cont rm <name>              delete a VM
+  cont snapshot <from> <to>   APFS-clone a VM (also: `clone`)
+  cont ip <name>              print VM IP
+  cont ssh <name> [cmd...]    ssh in (admin/admin)
+  cont open <name>            boot if needed and bring GUI window to front
+  cont provision <name> [s]   boot if needed, scp script in, run it (default: ./provision.sh)
+  cont spec <name>            show spec + live config
+  cont spec <name> k=v ...    set keys (cpu memory display disk); applies if stopped
+  cont spec <name> edit       open spec file in $EDITOR
+  cont spec <name> clear      remove the spec file
 EOF
 }
 

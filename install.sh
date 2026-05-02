@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# install — set up tart + sshpass and put `contain` on PATH.
+# install — set up tart + sshpass and put `cont` on PATH.
 # Usage: ./install.sh
 set -euo pipefail
 
@@ -26,17 +26,17 @@ if ! command -v sshpass >/dev/null; then
 fi
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-chmod +x "$SCRIPT_DIR/contain"
+chmod +x "$SCRIPT_DIR/cont"
 
-TARGET="/usr/local/bin/contain"
-if [[ "$(readlink "$TARGET" 2>/dev/null || true)" != "$SCRIPT_DIR/contain" ]]; then
-  echo "==> symlinking contain -> $TARGET (sudo) ..."
+TARGET="/usr/local/bin/cont"
+if [[ "$(readlink "$TARGET" 2>/dev/null || true)" != "$SCRIPT_DIR/cont" ]]; then
+  echo "==> symlinking cont -> $TARGET (sudo) ..."
   sudo mkdir -p /usr/local/bin
-  sudo ln -sf "$SCRIPT_DIR/contain" "$TARGET"
+  sudo ln -sf "$SCRIPT_DIR/cont" "$TARGET"
 fi
 
 echo
 echo "done. next steps:"
-echo "  contain pull          # fetch base image (~30GB, one-time)"
-echo "  contain up dev        # boot a VM"
-echo "  contain open dev      # VNC into it"
+echo "  cont pull          # fetch base image (~30GB, one-time)"
+echo "  cont up dev        # boot a VM"
+echo "  cont open dev      # VNC into it"

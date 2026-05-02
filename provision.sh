@@ -1,5 +1,5 @@
 #!/bin/bash
-# provision.sh — runs INSIDE a contain VM via `./contain provision <vm>`.
+# provision.sh — runs INSIDE a cont VM via `./cont provision <vm>`.
 # Idempotent — safe to re-run. Edit to taste; this matches a customized
 # "browse + terminal" setup.
 set -euo pipefail
