@@ -28,6 +28,9 @@ UPSTREAM_BASE="ghcr.io/cirruslabs/macos-tahoe-base:latest"
 CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/cont"
 BASE_FILE="$CONFIG_DIR/base"
 SPEC_DIR="$CONFIG_DIR/specs"
+CLAUDE_TOKEN_FILE="$CONFIG_DIR/claude-token"
+CLAUDE_CREDS_FILE="$CONFIG_DIR/claude-credentials.json"
+CLAUDE_ACCOUNT_FILE="$CONFIG_DIR/claude-account.json"
 SSH_USER="admin"
 SSH_PASS="admin"
 
@@ -100,6 +103,154 @@ ensure_sshpass() {
   }
 }
 
+has_valid_claude_token() {
+  [[ -f "$CLAUDE_TOKEN_FILE" ]] || return 1
+  local t; t="$(tr -d '[:space:]' < "$CLAUDE_TOKEN_FILE" 2>/dev/null)"
+  # Accept any sk-ant-oat... prefix (e.g. sk-ant-oat01_...).
+  [[ "$t" == sk-ant-oat* ]]
+}
+
+# Pull the OAuth token from the host's macOS keychain entry that Claude Code
+# writes ("Claude Code-credentials"). Returns 0 and prints the token on stdout
+# if a well-formed sk-ant-oat-... value is present, else returns 1.
+read_claude_token_from_keychain() {
+  local json token
+  json="$(security find-generic-password -s 'Claude Code-credentials' -w 2>/dev/null)" || return 1
+  [[ -n "$json" ]] || return 1
+  token="$(printf '%s' "$json" | python3 -c \
+    'import json,sys
+try:
+  d=json.load(sys.stdin)
+  t=d.get("claudeAiOauth",{}).get("accessToken","")
+  print(t if t.startswith("sk-ant-oat") else "")
+except Exception:
+  pass' 2>/dev/null)"
+  [[ -n "$token" ]] || return 1
+  printf '%s\n' "$token"
+}
+
+save_claude_token() {
+  local token="$1"
+  ( umask 077; printf '%s\n' "$token" > "$CLAUDE_TOKEN_FILE" )
+  chmod 600 "$CLAUDE_TOKEN_FILE"
+}
+
+# Trigger Claude Code's internal keychain refresh on the host so the access
+# token in "Claude Code-credentials" is rotated to a fresh one. Access
+# tokens expire in ~hours; the refreshToken is long-lived. Any claude
+# invocation that opens its config picks up the refresh as a side effect —
+# `claude --version` is the cheapest. Best-effort; ignore failures.
+refresh_host_claude_keychain() {
+  command -v claude >/dev/null || return 0
+  claude --version >/dev/null 2>&1 || true
+}
+
+# Save the full keychain credential blob so the VM can re-create an
+# identical keychain entry. Just the access token isn't enough — Claude
+# Code's interactive UI on macOS reads from the keychain entry
+# "Claude Code-credentials", which is a JSON object with refreshToken,
+# scopes, etc. Refresh first so we ship a non-expired access token.
+save_claude_credentials_blob() {
+  refresh_host_claude_keychain
+  local json
+  json="$(security find-generic-password -s 'Claude Code-credentials' -w 2>/dev/null)" || return 1
+  [[ -n "$json" ]] || return 1
+  ( umask 077; printf '%s' "$json" > "$CLAUDE_CREDS_FILE" )
+  chmod 600 "$CLAUDE_CREDS_FILE"
+}
+
+# Extract the auth/onboarding-state fields from the host's ~/.claude.json.
+# Claude Code's interactive UI gates "logged in?" on the presence of
+# `oauthAccount` (and friends) in this file — even when the keychain
+# entry exists. Without this, fresh VMs always show the login picker.
+# We deliberately copy ONLY auth-state keys: project paths, history,
+# repo paths, and other personal/host-specific state stay on the host.
+save_claude_account_blob() {
+  [[ -f "$HOME/.claude.json" ]] || return 1
+  python3 - "$HOME/.claude.json" "$CLAUDE_ACCOUNT_FILE" <<'PY' || return 1
+import json, os, sys
+src_path, dst_path = sys.argv[1], sys.argv[2]
+src = json.load(open(src_path))
+keys = [
+    "oauthAccount",
+    "hasCompletedOnboarding",
+    "hasAvailableSubscription",
+    "claudeCodeFirstTokenDate",
+    "lastOnboardingVersion",
+    "isQualifiedForDataSharing",
+    "subscriptionNoticeCount",
+]
+out = {k: src[k] for k in keys if k in src}
+if "oauthAccount" not in out:
+    sys.exit(2)  # not logged in on host
+os.umask(0o077)
+with open(dst_path, "w") as f:
+    json.dump(out, f)
+os.chmod(dst_path, 0o600)
+PY
+}
+
+cmd_auth() {
+  local sub="${1:-ensure}"
+  case "$sub" in
+    ensure)
+      if has_valid_claude_token; then
+        echo "claude oauth token: ok ($CLAUDE_TOKEN_FILE)"
+        return 0
+      fi
+      # Fast path: the host already has a Claude Code keychain credential
+      # (from any prior `claude setup-token` or interactive login). Use it
+      # without re-running the browser flow.
+      local token
+      if token="$(read_claude_token_from_keychain)"; then
+        save_claude_token "$token"
+        save_claude_credentials_blob || true
+        echo "saved token from keychain -> $CLAUDE_TOKEN_FILE"
+        [[ -f "$CLAUDE_CREDS_FILE" ]] && echo "saved full keychain blob -> $CLAUDE_CREDS_FILE"
+        return 0
+      fi
+      command -v claude >/dev/null || {
+        echo "error: 'claude' CLI not found on host — install Claude Code first" >&2
+        echo "  curl -fsSL https://claude.ai/install.sh | bash" >&2
+        exit 2
+      }
+      echo "==> running 'claude setup-token' — follow the browser flow"
+      claude setup-token
+      local rc=$?
+      if (( rc != 0 )); then
+        echo "error: 'claude setup-token' exited $rc" >&2
+        exit "$rc"
+      fi
+      # `claude setup-token` writes the credential into the macOS keychain
+      # (service: "Claude Code-credentials"); read it back from there.
+      if ! token="$(read_claude_token_from_keychain)"; then
+        echo "error: setup-token completed but no sk-ant-oat... token found" >&2
+        echo "       in keychain entry 'Claude Code-credentials'." >&2
+        exit 1
+      fi
+      save_claude_token "$token"
+      save_claude_credentials_blob || true
+      echo "saved token -> $CLAUDE_TOKEN_FILE"
+      [[ -f "$CLAUDE_CREDS_FILE" ]] && echo "saved full keychain blob -> $CLAUDE_CREDS_FILE"
+      ;;
+    show)
+      [[ -f "$CLAUDE_TOKEN_FILE" ]] || { echo "no token saved" >&2; exit 1; }
+      cat "$CLAUDE_TOKEN_FILE"
+      ;;
+    path)
+      echo "$CLAUDE_TOKEN_FILE"
+      ;;
+    clear|rm)
+      rm -f "$CLAUDE_TOKEN_FILE" "$CLAUDE_CREDS_FILE"
+      echo "cleared $CLAUDE_TOKEN_FILE"
+      ;;
+    *)
+      echo "usage: cont auth [ensure|show|path|clear]" >&2
+      exit 2
+      ;;
+  esac
+}
+
 cmd_pull() {
   local img="${1:-$UPSTREAM_BASE}"
   echo "pulling $img ..."
@@ -136,11 +287,32 @@ cmd_up() {
   if vm_running "$name"; then
     echo "$name already running"; return
   fi
+  local log="/tmp/cont-$name.log"
   echo "booting $name (headless) ..."
-  nohup tart run --no-graphics "$name" </dev/null >/tmp/cont-"$name".log 2>&1 &
-  disown || true
-  sleep 1
-  echo "started. log: /tmp/cont-$name.log"
+  nohup tart run --no-graphics "$name" </dev/null >"$log" 2>&1 &
+  local pid=$!
+  disown "$pid" 2>/dev/null || true
+  # Wait until the VM registers as running, OR tart exits (boot failure —
+  # e.g. "VMs exceed the system limit" when 2+ other VMs are already up).
+  for _ in $(seq 1 30); do
+    if vm_running "$name"; then
+      echo "started. log: $log"
+      return
+    fi
+    if ! kill -0 "$pid" 2>/dev/null; then
+      echo "error: tart run exited before $name reached running state." >&2
+      echo "--- last lines of $log ---" >&2
+      tail -10 "$log" >&2
+      echo "--- running VMs (system cap is typically 2) ---" >&2
+      tart list 2>&1 | awk 'NR==1 || $NF=="running"' >&2
+      exit 1
+    fi
+    sleep 1
+  done
+  echo "error: $name didn't reach running state within 30s." >&2
+  echo "--- last lines of $log ---" >&2
+  tail -10 "$log" >&2
+  exit 1
 }
 
 cmd_open() {
@@ -220,6 +392,8 @@ cmd_ssh() {
     -o StrictHostKeyChecking=no \
     -o UserKnownHostsFile=/dev/null \
     -o LogLevel=ERROR \
+    -o PreferredAuthentications=password \
+    -o PubkeyAuthentication=no \
     "$SSH_USER@$ip" "$@"
 }
 
@@ -246,6 +420,8 @@ cmd_provision() {
         -o StrictHostKeyChecking=no \
         -o UserKnownHostsFile=/dev/null \
         -o LogLevel=ERROR \
+        -o PreferredAuthentications=password \
+        -o PubkeyAuthentication=no \
         -o ConnectTimeout=2 \
         "$SSH_USER@$ip" true 2>/dev/null; then
       break
@@ -258,13 +434,73 @@ cmd_provision() {
     -o StrictHostKeyChecking=no \
     -o UserKnownHostsFile=/dev/null \
     -o LogLevel=ERROR \
+    -o PreferredAuthentications=password \
+    -o PubkeyAuthentication=no \
     "$script" "$SSH_USER@$ip:/tmp/cont-provision.sh"
+
+  # Refresh the host's Claude Code keychain entry (rotates the access token
+  # via refreshToken) and re-save both artifacts so we always ship a
+  # non-expired blob to the VM. Best-effort: if `claude` isn't installed on
+  # the host or the keychain entry is missing, we ship whatever was last
+  # saved by `cont auth` (or skip injection entirely).
+  if [[ -f "$CLAUDE_TOKEN_FILE" || -f "$CLAUDE_CREDS_FILE" ]]; then
+    save_claude_credentials_blob >/dev/null 2>&1 || true
+    save_claude_account_blob >/dev/null 2>&1 || true
+    local fresh
+    if fresh="$(read_claude_token_from_keychain 2>/dev/null)"; then
+      save_claude_token "$fresh"
+    fi
+  fi
+
+  # If a host-side Claude OAuth token exists, scp it in so token-aware
+  # provision scripts can pick it up and write it to the VM's shell rc.
+  if [[ -f "$CLAUDE_TOKEN_FILE" ]]; then
+    echo "==> copying claude oauth token -> $name:/tmp/cont-claude-token ..."
+    sshpass -p "$SSH_PASS" scp \
+      -o StrictHostKeyChecking=no \
+      -o UserKnownHostsFile=/dev/null \
+      -o LogLevel=ERROR \
+      -o PreferredAuthentications=password \
+      -o PubkeyAuthentication=no \
+      "$CLAUDE_TOKEN_FILE" "$SSH_USER@$ip:/tmp/cont-claude-token"
+  fi
+
+  # Ship the full keychain credential blob so the agent layer can re-create
+  # the "Claude Code-credentials" entry inside the VM's login keychain. This
+  # is what makes the interactive `claude` UI skip the login screen.
+  if [[ -f "$CLAUDE_CREDS_FILE" ]]; then
+    echo "==> copying claude keychain blob -> $name:/tmp/cont-claude-credentials.json ..."
+    sshpass -p "$SSH_PASS" scp \
+      -o StrictHostKeyChecking=no \
+      -o UserKnownHostsFile=/dev/null \
+      -o LogLevel=ERROR \
+      -o PreferredAuthentications=password \
+      -o PubkeyAuthentication=no \
+      "$CLAUDE_CREDS_FILE" "$SSH_USER@$ip:/tmp/cont-claude-credentials.json"
+  fi
+
+  # Ship the auth-state fields extracted from the host's ~/.claude.json
+  # (oauthAccount, hasCompletedOnboarding, etc). Without these merged in,
+  # claude treats the VM as a brand-new install and shows the login
+  # picker even if the keychain entry exists.
+  if [[ -f "$CLAUDE_ACCOUNT_FILE" ]]; then
+    echo "==> copying claude account blob -> $name:/tmp/cont-claude-account.json ..."
+    sshpass -p "$SSH_PASS" scp \
+      -o StrictHostKeyChecking=no \
+      -o UserKnownHostsFile=/dev/null \
+      -o LogLevel=ERROR \
+      -o PreferredAuthentications=password \
+      -o PubkeyAuthentication=no \
+      "$CLAUDE_ACCOUNT_FILE" "$SSH_USER@$ip:/tmp/cont-claude-account.json"
+  fi
 
   echo "==> running provision script in $name ..."
   sshpass -p "$SSH_PASS" ssh \
     -o StrictHostKeyChecking=no \
     -o UserKnownHostsFile=/dev/null \
     -o LogLevel=ERROR \
+    -o PreferredAuthentications=password \
+    -o PubkeyAuthentication=no \
     "$SSH_USER@$ip" "bash /tmp/cont-provision.sh"
 }
 
@@ -322,6 +558,10 @@ cont — programmatic macOS-on-macOS environments via tart
 
   cont pull [image]           pull base image (default: cirruslabs tahoe)
   cont base [image]           show or set the base image used for `up`
+  cont auth [ensure|show|path|clear]
+                              ensure (default) runs `claude setup-token` if no
+                              valid token saved; the token is auto-injected
+                              into VMs by `cont provision`
   cont list                   list all VMs and their status
   cont status                 show base + list
   cont up <name>              clone base -> name (if missing) and boot
@@ -345,6 +585,7 @@ main() {
   case "$cmd" in
     pull)     cmd_pull "$@" ;;
     base)     cmd_base "$@" ;;
+    auth)     cmd_auth "$@" ;;
     list|ls)  cmd_list ;;
     status)   cmd_status ;;
     up|start) cmd_up "$@" ;;
