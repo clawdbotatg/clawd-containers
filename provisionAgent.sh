@@ -57,19 +57,37 @@ export PATH="$HOME/.local/bin:$PATH"
 ACCOUNT_FILE="/tmp/cont-claude-account.json"
 if [[ -f "$ACCOUNT_FILE" ]]; then
   echo "==> merging claude account state into ~/.claude.json"
-  python3 - "$ACCOUNT_FILE" "$HOME/.claude.json" <<'PY'
+  python3 - "$ACCOUNT_FILE" "$HOME/.claude.json" "$HOME/.claude/settings.json" "$HOME" <<'PY'
 import json, os, sys
-src_path, dst_path = sys.argv[1], sys.argv[2]
+src_path, claude_json_path, settings_json_path, home = sys.argv[1:]
 patch = json.load(open(src_path))
-if os.path.exists(dst_path):
-    base = json.load(open(dst_path))
+if os.path.exists(claude_json_path):
+    base = json.load(open(claude_json_path))
 else:
     base = {}
 base.update(patch)
+# Pre-trust the user's home directory so claude doesn't prompt with
+# "Quick safety check: is this a project you trust?" on first run.
+projects = base.setdefault("projects", {})
+projects.setdefault(home, {})["hasTrustDialogAccepted"] = True
 os.umask(0o077)
-with open(dst_path, "w") as f:
+with open(claude_json_path, "w") as f:
     json.dump(base, f, indent=2)
-os.chmod(dst_path, 0o600)
+os.chmod(claude_json_path, 0o600)
+# Pre-accept the --dangerously-skip-permissions warning. The wrapper
+# launches claude with that flag (the VM IS the sandbox), and without
+# this acknowledgement claude shows a one-time "I accept" gate.
+# The flag lives in user settings under skipDangerousModePermissionPrompt;
+# setting it on .claude.json gets migrated away by claude on next launch.
+os.makedirs(os.path.dirname(settings_json_path), exist_ok=True)
+if os.path.exists(settings_json_path):
+    settings = json.load(open(settings_json_path))
+else:
+    settings = {}
+settings["skipDangerousModePermissionPrompt"] = True
+with open(settings_json_path, "w") as f:
+    json.dump(settings, f, indent=2)
+os.chmod(settings_json_path, 0o600)
 PY
   rm -f "$ACCOUNT_FILE"
 fi
@@ -145,6 +163,85 @@ if [[ -f "$TOKEN_FILE" ]]; then
   done
   rm -f "$TOKEN_FILE"
 fi
+
+# --- Auto-launch on login -----------------------------------------------
+# Approach: an iTerm Dynamic Profile whose default command is our wrapper
+# script. A LaunchAgent runs `open -a iTerm` at Aqua login, iTerm opens a
+# window using the default profile, the profile's command runs
+# `claude --chrome "gm"`. Going via Dynamic Profile avoids the macOS
+# "OK to run this script?" LaunchServices prompt that fires when iTerm
+# opens a `.command` file directly.
+
+echo "==> installing claude-startup wrapper, iTerm dynamic profile, LaunchAgent"
+
+mkdir -p \
+  "$HOME/.local/bin" \
+  "$HOME/Library/LaunchAgents" \
+  "$HOME/Library/Application Support/iTerm2/DynamicProfiles"
+
+# Wrapper. iTerm execs this as the session command, so it must source
+# .zprofile to get PATH (iTerm doesn't inherit launchd's env into the
+# child process for custom-command profiles).
+cat > "$HOME/.local/bin/claude-startup.sh" <<'EOSH'
+#!/bin/bash
+# This VM is the sandbox — give claude full reign. The flag is documented
+# as "Recommended only for sandboxes with no internet access," but a
+# throwaway VM has the same blast-radius properties.
+source "$HOME/.zprofile" 2>/dev/null || true
+exec "$HOME/.local/bin/claude" --dangerously-skip-permissions --chrome "gm"
+EOSH
+chmod 755 "$HOME/.local/bin/claude-startup.sh"
+
+# Dynamic Profile — fixed Guid so re-provisioning updates rather than
+# duplicating. Setting Default Bookmark Guid below makes iTerm use this
+# profile for new windows on launch.
+PROFILE_GUID="claude-startup-cont-fixed"
+cat > "$HOME/Library/Application Support/iTerm2/DynamicProfiles/claude-startup.json" <<EOPROF
+{
+  "Profiles": [
+    {
+      "Name": "claude-startup",
+      "Guid": "$PROFILE_GUID",
+      "Custom Command": "Yes",
+      "Command": "$HOME/.local/bin/claude-startup.sh",
+      "Custom Directory": "Yes",
+      "Working Directory": "$HOME"
+    }
+  ]
+}
+EOPROF
+
+# Make claude-startup the default profile for new iTerm windows.
+defaults write com.googlecode.iterm2 "Default Bookmark Guid" -string "$PROFILE_GUID"
+
+# LaunchAgent: just open iTerm at login. No script argument => no
+# LaunchServices "OK to run this script?" prompt. iTerm opens a window
+# with the default profile, which runs claude --chrome "gm".
+cat > "$HOME/Library/LaunchAgents/com.cont.claude-startup.plist" <<EOPLIST
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.cont.claude-startup</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/usr/bin/open</string>
+    <string>-a</string>
+    <string>iTerm</string>
+  </array>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>LimitLoadToSessionType</key>
+  <string>Aqua</string>
+</dict>
+</plist>
+EOPLIST
+chmod 644 "$HOME/Library/LaunchAgents/com.cont.claude-startup.plist"
+
+# Clean up the .command file from earlier iterations of this script so
+# stale stuff doesn't accumulate.
+rm -f "$HOME/.local/bin/claude-startup.command"
 
 # --- Final auth sanity check --------------------------------------------
 # Single source-of-truth verification: run a tiny non-interactive claude

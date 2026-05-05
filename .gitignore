@@ -1,3 +1,4 @@
 *.log
 .DS_Store
 /vms/
+.claude/settings.local.json

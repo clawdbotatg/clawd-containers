@@ -171,16 +171,50 @@ save_claude_account_blob() {
 import json, os, sys
 src_path, dst_path = sys.argv[1], sys.argv[2]
 src = json.load(open(src_path))
-keys = [
+# Auth / "is logged in?" gate.
+auth_keys = [
     "oauthAccount",
-    "hasCompletedOnboarding",
     "hasAvailableSubscription",
     "claudeCodeFirstTokenDate",
-    "lastOnboardingVersion",
     "isQualifiedForDataSharing",
     "subscriptionNoticeCount",
+    "lastOnboardingVersion",
+    "userID",
 ]
-out = {k: src[k] for k in keys if k in src}
+# Dialog/onboarding gates. Each of these, when present and "completed,"
+# suppresses an otherwise-blocking first-run dialog. Listed explicitly
+# rather than wildcarded so we don't accidentally smuggle in stateful
+# host-only fields (project paths, GitHub paths, etc).
+dialog_keys = [
+    "hasCompletedOnboarding",
+    "hasCompletedClaudeInChromeOnboarding",
+    "claudeInChromeDefaultEnabled",
+    "cachedChromeExtensionInstalled",
+    "hasShownOpus45Notice",
+    "hasShownOpus46Notice",
+    "hasShownOpus47Notice",
+    "effortCalloutV2Dismissed",
+    "remoteDialogSeen",
+    "remoteControlUpsellSeenCount",
+    "lastReleaseNotesSeen",
+    "hasOpusPlanDefault",
+    "hasResetAutoModeOptInForDefaultOffer",
+    "hasVisitedPasses",
+    "passesUpsellSeenCount",
+    "opus47LaunchSeenCount",
+    "opus46FeedSeenCount",
+    "opus45MigrationComplete",
+    "opusProMigrationComplete",
+    "sonnet1m45MigrationComplete",
+    "sonnet45MigrationComplete",
+    "thinkingMigrationComplete",
+    "tipsHistory",
+    "claudeCodeHints",
+    "shiftEnterKeyBindingInstalled",
+    "officialMarketplaceAutoInstallAttempted",
+    "officialMarketplaceAutoInstalled",
+]
+out = {k: src[k] for k in (auth_keys + dialog_keys) if k in src}
 if "oauthAccount" not in out:
     sys.exit(2)  # not logged in on host
 os.umask(0o077)
