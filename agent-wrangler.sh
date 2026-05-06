@@ -57,16 +57,19 @@ except Exception:
   pass' 2>/dev/null
 }
 
-# Count IN_PROGRESS only (status==1) — distinguishes "I have work to
-# resume" from "I just have stuff in my queue I haven't accepted yet."
-count_my_inprogress() {
+# Count jobs in MY queue: assigned-to-me but not yet accepted (status=0
+# with worker=me) OR in-progress (status=1). leftclaw's flow is:
+# client picks a worker -> status stays 0 with worker set -> worker
+# calls acceptJob -> status moves to 1. my-jobs.sh already filters to
+# {0, 1} for our wallet, so we just count its array length.
+count_my_queue() {
   local svc="$1" env="$2"
   ( set -a; source "$env" 2>/dev/null; set +a
     ./scripts/leftclaw/my-jobs.sh "$svc" 2>/dev/null
   ) | python3 -c 'import json,sys
 try:
   d = json.load(sys.stdin)
-  print(sum(1 for j in d if j.get("status") == 1))
+  print(len(d) if isinstance(d, list) else 0)
 except Exception:
   pass' 2>/dev/null
 }
@@ -125,7 +128,7 @@ while :; do
     fi
 
     open=$(count_jobs list-jobs.sh "$svc" "$env")
-    mine=$(count_my_inprogress "$svc" "$env")
+    mine=$(count_my_queue "$svc" "$env")
     open=${open:-?}
     mine=${mine:-?}
 
@@ -137,7 +140,7 @@ while :; do
       fi
     else
       if [[ "$mine" =~ ^[1-9] ]]; then
-        log "$vm: wallet has $mine in-progress type-$svc job(s) — booting to resume"
+        log "$vm: wallet has $mine assigned/in-progress type-$svc job(s) — booting"
         start_vm "$vm" "$prov" || log "$vm: start failed; will retry next tick"
       elif [[ "$open" =~ ^[1-9] ]]; then
         log "$vm: $open open type-$svc job(s) — booting"
