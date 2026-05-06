@@ -19,11 +19,16 @@ SVC="${1:-}"
 ME="$(cast wallet address "$PRIVATE_KEY")"
 ME_LOWER="$(printf '%s' "$ME" | tr '[:upper:]' '[:lower:]')"
 
-# OPEN ∪ IN_PROGRESS as candidates.
+# OPEN ∪ IN_PROGRESS as candidates. Filter out dead ghost IDs (see
+# list-jobs.sh comment) — the contract still lists 1..34 in
+# getOpenJobs() but getJob() reverts on each, wasting RPC calls.
+MIN_LIVE_ID="${MIN_LIVE_ID:-80}"
 open_ids="$(cast call "$CONTRACT" 'getOpenJobs()(uint256[])' --rpc-url "$RPC" 2>/dev/null \
-            | tr -d '[]' | tr ',' '\n' | awk '{$1=$1};1' | grep -E '^[0-9]+$' || true)"
+            | tr -d '[]' | tr ',' '\n' | awk '{$1=$1};1' | grep -E '^[0-9]+$' \
+            | awk -v min="$MIN_LIVE_ID" '$1 >= min' || true)"
 inprog_ids="$(cast call "$CONTRACT" 'getJobsByStatus(uint8)(uint256[])' 1 --rpc-url "$RPC" 2>/dev/null \
-            | tr -d '[]' | tr ',' '\n' | awk '{$1=$1};1' | grep -E '^[0-9]+$' || true)"
+            | tr -d '[]' | tr ',' '\n' | awk '{$1=$1};1' | grep -E '^[0-9]+$' \
+            | awk -v min="$MIN_LIVE_ID" '$1 >= min' || true)"
 ids="$(printf '%s\n%s\n' "$open_ids" "$inprog_ids" | sort -un)"
 
 declare -a out=()

@@ -15,8 +15,15 @@ HERE="$(cd "$(dirname "$0")" && pwd)"
 
 # `cast call ... 'getOpenJobs()(uint256[])'` returns a bracketed list,
 # e.g.  [1, 2, 3, 92, 93]
+#
+# The contract has dead "ghost" IDs in its getOpenJobs() output that
+# revert with "!job" when getJob() is called. As of May 2026 they're
+# IDs 1..34 — querying them on every poll wastes ~14s of RPC time.
+# Filter to IDs >= MIN_LIVE_ID. Bump if leftclaw cleans up the ghosts.
+MIN_LIVE_ID="${MIN_LIVE_ID:-80}"
 ids="$(cast call "$CONTRACT" 'getOpenJobs()(uint256[])' --rpc-url "$RPC" 2>/dev/null \
-      | tr -d '[]' | tr ',' '\n' | awk '{$1=$1};1' | grep -E '^[0-9]+$' || true)"
+      | tr -d '[]' | tr ',' '\n' | awk '{$1=$1};1' | grep -E '^[0-9]+$' \
+      | awk -v min="$MIN_LIVE_ID" '$1 >= min' || true)"
 
 declare -a out=()
 for jid in $ids; do
