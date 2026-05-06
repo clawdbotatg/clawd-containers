@@ -30,6 +30,7 @@ cd "$HERE"
 # you add coordination logic below.
 AGENTS=(
   "4:auditor:provisionAuditorAgent.sh:.env.auditor"
+  "5:frontendqa:provisionFrontendQAAgent.sh:.env.frontend-qa"
   "7:research:provisionResearchAgent.sh:.env.research"
 )
 
