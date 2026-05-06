@@ -1,19 +1,22 @@
 #!/bin/bash
 # provisionAgent.sh — runs INSIDE a cont VM via `./cont provision <vm> ./provisionAgent.sh`.
 #
-# Designed to layer on top of a gold image already built from provision.sh:
-#   cont up base
-#   cont provision base ./provision.sh        # bake browse+terminal setup
-#   cont snapshot base gold
-#   cont base gold                            # future VMs clone from gold
-#   cont up agent
-#   cont provision agent ./provisionAgent.sh  # adds only the Claude layer
+# Layered model — each script `source`s the layer below so any of them is a
+# complete "fresh upstream VM -> ready" recipe:
 #
-# Idempotent — safe to re-run. Doesn't reinstall Homebrew/Chrome/iTerm; assumes
-# the gold image already has them.
+#   provision.sh           clean mac (brew, terminal, browser)
+#   provisionAgent.sh      ^ + Claude Code + auth + auto-launch
+#   provisionXxxAgent.sh   ^ + your specialization
+#
+# Idempotent — on a gold-cloned VM the lower layers no-op (~10s) and only
+# the new layer does meaningful work.
 set -euo pipefail
 
-eval "$(/opt/homebrew/bin/brew shellenv)"
+# Cascade: run the clean-mac layer first. cont provision scps all
+# provision*.sh siblings into /tmp alongside this one, so this resolves
+# whether we're running from the source dir or from /tmp inside the VM.
+SELF_DIR="$(cd "$(dirname "$0")" && pwd)"
+source "$SELF_DIR/provision.sh"
 
 echo "==> agent layer: $(whoami)@$(hostname) ($(sw_vers -productName) $(sw_vers -productVersion))"
 
@@ -256,5 +259,10 @@ case "$out" in
   *OK*) echo "==> claude auth ok" ;;
   *)    echo "ERROR: unexpected claude reply: $out" >&2; exit 1 ;;
 esac
+
+# Flush all writes to disk. tart stop is not always graceful and can roll
+# back recent unsynced writes (we hit this when freshly-written files
+# vanished after `cont open` rebooted the VM).
+sync
 
 echo "==> agent layer: done"

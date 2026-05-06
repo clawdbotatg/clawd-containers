@@ -463,14 +463,60 @@ cmd_provision() {
     sleep 2
   done
 
-  echo "==> copying $(basename "$script") -> $name:/tmp/cont-provision.sh ..."
-  sshpass -p "$SSH_PASS" scp \
-    -o StrictHostKeyChecking=no \
-    -o UserKnownHostsFile=/dev/null \
-    -o LogLevel=ERROR \
-    -o PreferredAuthentications=password \
-    -o PubkeyAuthentication=no \
-    "$script" "$SSH_USER@$ip:/tmp/cont-provision.sh"
+  # Scp the named script *and* any `provision*.sh` siblings in its directory,
+  # each keeping its original basename. This is what makes the cascading
+  # `source "$SELF_DIR/provision.sh"` pattern resolve correctly inside the
+  # VM — provisionAgent.sh / provisionXxxAgent.sh can `source` provision.sh
+  # because they all land in /tmp together.
+  local script_dir; script_dir="$(cd "$(dirname "$script")" && pwd)"
+  local script_name; script_name="$(basename "$script")"
+  local seen_files=" "
+  local f fname
+  # Scp the named script + any provision*.sh siblings (so cascading
+  # `source` resolves) + any .env* siblings (so specialized scripts can
+  # install secrets) + any *.prompt.md siblings (so prompt files travel
+  # with their provision scripts). Skip *.example/*.sample template
+  # files. Each file keeps its original basename inside /tmp so
+  # source/include paths line up.
+  for f in "$script" "$script_dir"/provision*.sh "$script_dir"/.env* "$script_dir"/*.prompt.md; do
+    [[ -f "$f" ]] || continue
+    case "$f" in *.example|*.sample) continue ;; esac
+    fname="$(basename "$f")"
+    case "$seen_files" in *" $fname "*) continue ;; esac
+    seen_files+="$fname "
+    echo "==> copying $fname -> $name:/tmp/$fname ..."
+    sshpass -p "$SSH_PASS" scp \
+      -o StrictHostKeyChecking=no \
+      -o UserKnownHostsFile=/dev/null \
+      -o LogLevel=ERROR \
+      -o PreferredAuthentications=password \
+      -o PubkeyAuthentication=no \
+      "$f" "$SSH_USER@$ip:/tmp/$fname"
+  done
+
+  # Also scp the scripts/ and skills/ directories if they're siblings of
+  # the named provision script. Specialized provision scripts (e.g.
+  # provisionAuditorAgent.sh) install selected sub-trees from these.
+  local d
+  for d in scripts skills; do
+    [[ -d "$script_dir/$d" ]] || continue
+    echo "==> copying $d/ -> $name:/tmp/$d/ ..."
+    # Wipe any prior copy so re-provisioning doesn't leave stale files.
+    sshpass -p "$SSH_PASS" ssh \
+      -o StrictHostKeyChecking=no \
+      -o UserKnownHostsFile=/dev/null \
+      -o LogLevel=ERROR \
+      -o PreferredAuthentications=password \
+      -o PubkeyAuthentication=no \
+      "$SSH_USER@$ip" "rm -rf /tmp/$d"
+    sshpass -p "$SSH_PASS" scp -r \
+      -o StrictHostKeyChecking=no \
+      -o UserKnownHostsFile=/dev/null \
+      -o LogLevel=ERROR \
+      -o PreferredAuthentications=password \
+      -o PubkeyAuthentication=no \
+      "$script_dir/$d" "$SSH_USER@$ip:/tmp/$d"
+  done
 
   # Refresh the host's Claude Code keychain entry (rotates the access token
   # via refreshToken) and re-save both artifacts so we always ship a
@@ -528,14 +574,14 @@ cmd_provision() {
       "$CLAUDE_ACCOUNT_FILE" "$SSH_USER@$ip:/tmp/cont-claude-account.json"
   fi
 
-  echo "==> running provision script in $name ..."
+  echo "==> running $script_name in $name ..."
   sshpass -p "$SSH_PASS" ssh \
     -o StrictHostKeyChecking=no \
     -o UserKnownHostsFile=/dev/null \
     -o LogLevel=ERROR \
     -o PreferredAuthentications=password \
     -o PubkeyAuthentication=no \
-    "$SSH_USER@$ip" "bash /tmp/cont-provision.sh"
+    "$SSH_USER@$ip" "bash /tmp/$script_name && sync && sync"
 }
 
 cmd_spec() {

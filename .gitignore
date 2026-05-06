@@ -1,4 +1,12 @@
 *.log
 .DS_Store
 /vms/
-.claude/settings.local.json
+.claude/
+.env
+.env.*
+!.env.*.example
+
+# Skill repos — pulled by ./refresh-skills.sh, not committed (their own .git dirs
+# would otherwise turn into half-broken submodules).
+/skills/evm-audit-skills/
+/skills/pashov-skills/

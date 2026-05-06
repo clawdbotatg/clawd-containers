@@ -39,6 +39,15 @@ sudo xattr -dr com.apple.quarantine /Applications/iTerm.app 2>/dev/null || true
 echo "==> iTerm2: dark theme"
 defaults write com.googlecode.iterm2 TabStyleWithAutomaticOption -int 1
 
+# --- iTerm2: skip first-run dialogs --------------------------------------
+# Without these, iTerm shows blocking "Check for updates automatically?"
+# (Sparkle) and tip-of-the-day prompts on first launch, which prevent the
+# auto-launched startup wrapper from actually running claude.
+echo "==> iTerm2: suppress first-run dialogs"
+defaults write com.googlecode.iterm2 SUEnableAutomaticChecks -bool false
+defaults write com.googlecode.iterm2 NoSyncTipOfTheDayEligible -bool false
+defaults write com.googlecode.iterm2 PromptOnQuit -bool false
+
 # --- Dock: trim to just the essentials -----------------------------------
 echo "==> Dock: trim to Safari/Chrome/iTerm/System Settings"
 dock_add() {
