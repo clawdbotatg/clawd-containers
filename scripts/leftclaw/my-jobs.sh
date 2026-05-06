@@ -5,6 +5,8 @@
 # Usage: my-jobs.sh [service_type_id]   (defaults: any service type)
 #
 # Output: JSON array. Filters: worker == my address AND status in {0, 1}.
+# Uses getOpenJobs() (status 0) ∪ getJobsByStatus(1) (IN_PROGRESS) as the
+# candidate set, then filters by worker.
 set -euo pipefail
 : "${PRIVATE_KEY:?PRIVATE_KEY not set}"
 : "${ALCHEMY_API_KEY:?ALCHEMY_API_KEY not set}"
@@ -17,21 +19,16 @@ SVC="${1:-}"
 ME="$(cast wallet address "$PRIVATE_KEY")"
 ME_LOWER="$(printf '%s' "$ME" | tr '[:upper:]' '[:lower:]')"
 
-# Same job-discovery scan as list-jobs.sh — events over the last 100k blocks.
-BLOCK="$(cast block-number --rpc-url "$RPC")"
-FROM=$(( BLOCK - 100000 ))
-JOB_CREATED_TOPIC="0x4426e4a90a9570c8f678a263b11785eaaade8b79d76d18c43d4d8e00062e4f83"
-
-ids="$(cast logs --address "$CONTRACT" --from-block "$FROM" \
-        "$JOB_CREATED_TOPIC" --rpc-url "$RPC" 2>/dev/null \
-      | grep -A1 -F "$JOB_CREATED_TOPIC" \
-      | grep -oE '0x0+[0-9a-f]+' \
-      | sed 's/0x0*//' | sort -u)"
+# OPEN ∪ IN_PROGRESS as candidates.
+open_ids="$(cast call "$CONTRACT" 'getOpenJobs()(uint256[])' --rpc-url "$RPC" 2>/dev/null \
+            | tr -d '[]' | tr ',' '\n' | awk '{$1=$1};1' | grep -E '^[0-9]+$' || true)"
+inprog_ids="$(cast call "$CONTRACT" 'getJobsByStatus(uint8)(uint256[])' 1 --rpc-url "$RPC" 2>/dev/null \
+            | tr -d '[]' | tr ',' '\n' | awk '{$1=$1};1' | grep -E '^[0-9]+$' || true)"
+ids="$(printf '%s\n%s\n' "$open_ids" "$inprog_ids" | sort -un)"
 
 declare -a out=()
-for hex_id in $ids; do
-  [[ -n "$hex_id" ]] || continue
-  jid=$((16#$hex_id))
+for jid in $ids; do
+  [[ -n "$jid" ]] || continue
   json="$("$HERE/get-job.sh" "$jid" 2>/dev/null || true)"
   [[ -n "$json" ]] || continue
   match="$(printf '%s' "$json" | ME_LOWER="$ME_LOWER" SVC="$SVC" python3 -c "
@@ -47,7 +44,7 @@ if worker != me: sys.exit(0)
 if d.get('status') not in (0, 1): sys.exit(0)
 if svc and str(d.get('serviceTypeId')) != svc: sys.exit(0)
 print(json.dumps(d))
-")"
+" 2>/dev/null || true)"
   [[ -n "$match" ]] && out+=("$match")
 done
 

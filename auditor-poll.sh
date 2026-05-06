@@ -75,7 +75,19 @@ vm_running() {
 }
 
 start_vm() {
-  log "starting $VM (work waiting)"
+  # Re-provision before each spin-up so the VM always has the latest
+  # scripts/skills/prompt from the host repo. Then down+up to force a
+  # fresh Aqua login so the in-VM LaunchAgent fires claude with the
+  # newly-installed scripts (it'd otherwise still be running the
+  # claude-startup.sh from the previous boot).
+  log "re-provisioning $VM (work waiting; ensuring fresh scripts)"
+  if ! ./cont provision "$VM" ./provisionAuditorAgent.sh >>"$LOG" 2>&1; then
+    log "  cont provision failed — see $LOG"
+    return 1
+  fi
+  log "  bouncing $VM so fresh Aqua login fires the LaunchAgent"
+  ./cont down "$VM" >>"$LOG" 2>&1 || true
+  sleep 3
   if ! ./cont up "$VM" >>"$LOG" 2>&1; then
     log "  cont up failed — see $LOG"
     return 1
