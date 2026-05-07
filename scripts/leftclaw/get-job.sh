@@ -42,15 +42,13 @@ out = {
     "serviceTypeId": w_uint(3) if len(words) > 3 else None,
 }
 
-# status: smallest uint8-shaped value (0..3) appearing after the
-# serviceTypeId slot but BEFORE any obvious string-offset slot.
-status = None
-for i in range(4, min(len(words), 24)):
-    v = w_uint(i)
-    if 0 <= v <= 3:
-        status = v
-        break
-out["status"] = status
+# status: word[7] in the deployed ABI (0=OPEN, 1=IN_PROGRESS aka ACTIVE,
+# 2=COMPLETE, 3=CANCELLED). Verified against jobs 91/92/97/99 by
+# cross-checking with getJobsByStatus(N). The earlier "find first
+# 0..3 value after serviceTypeId" heuristic was wrong — it picked up
+# whatever uint happened to land in word[4] (often 0), so a COMPLETE
+# job (word[7]=2) was reported as OPEN.
+out["status"] = w_uint(7) if len(words) > 7 else None
 
 # worker: an address slot (last 20 bytes nonzero, first 12 bytes all zero)
 # appearing at position > 3. Take the LAST such slot before the dynamic
