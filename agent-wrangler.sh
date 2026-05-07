@@ -38,8 +38,42 @@ AGENTS=(
 INTERVAL="${1:-60}"
 LOG="${LOG:-/tmp/agent-wrangler.log}"
 
+# Soft time cap per VM. If a VM has been running longer than this, the
+# wrangler stops it on the next tick — even if its queue still has work.
+# Backstop for runaway/stuck claude sessions; tunable per agent type by
+# editing TIME_CAP_<UPPER_VM_NAME>_SECONDS below.
+#
+# Defaults: 2h for builder (matches the playbook's 1.5h budget + 30 min
+# slack), 1h for the others (audit/qa/research are quicker).
+TIME_CAP_DEFAULT_SECONDS="${TIME_CAP_DEFAULT_SECONDS:-3600}"   # 1h
+TIME_CAP_BUILDER_SECONDS="${TIME_CAP_BUILDER_SECONDS:-7200}"   # 2h
+
+# Per-VM start-time markers. Used to compute elapsed for the cap.
+STATE_DIR="${TMPDIR:-/tmp}/agent-wrangler"
+mkdir -p "$STATE_DIR"
+
 log() {
   printf '[%s] %s\n' "$(date '+%F %T')" "$*" | tee -a "$LOG"
+}
+
+# Cap for a given VM name — special-cased for builder, default otherwise.
+cap_for() {
+  case "$1" in
+    builder) echo "$TIME_CAP_BUILDER_SECONDS" ;;
+    *)       echo "$TIME_CAP_DEFAULT_SECONDS" ;;
+  esac
+}
+
+mark_started() {
+  date +%s > "$STATE_DIR/$1.started"
+}
+clear_started() {
+  rm -f "$STATE_DIR/$1.started"
+}
+elapsed_seconds() {
+  local f="$STATE_DIR/$1.started"
+  [[ -f "$f" ]] || { echo 0; return; }
+  echo $(( $(date +%s) - $(cat "$f") ))
 }
 
 # Count the JSON array length emitted by list-jobs.sh / my-jobs.sh.
@@ -96,15 +130,17 @@ start_vm() {
     log "  cont up failed (tart 2-VM cap?) — see $LOG"
     return 1
   fi
+  mark_started "$vm"
   # Settle time so claude has Aqua + LaunchAgent + iTerm + scripts up
   # before the next loop iteration sees the queue change.
   sleep 30
 }
 
 stop_vm() {
-  local vm="$1"
-  log "stopping $vm (idle — no in-progress, no open)"
+  local vm="$1" reason="${2:-idle — no in-progress, no open}"
+  log "stopping $vm ($reason)"
   ./cont down "$vm" >>"$LOG" 2>&1 || true
+  clear_started "$vm"
 }
 
 trap 'log "wrangler exiting"; exit 0' INT TERM
@@ -134,10 +170,18 @@ while :; do
     mine=${mine:-?}
 
     if vm_running "$vm"; then
-      if [[ "$mine" == "0" && "$open" == "0" ]]; then
+      # If the wrangler restarted while a VM was already running, the
+      # marker won't exist — assume "now" so we don't immediately
+      # time-cap a fresh runtime.
+      [[ -f "$STATE_DIR/$vm.started" ]] || mark_started "$vm"
+      cap=$(cap_for "$vm")
+      elapsed=$(elapsed_seconds "$vm")
+      if (( elapsed > cap )); then
+        stop_vm "$vm" "TIME CAP EXCEEDED (${elapsed}s > ${cap}s) — runaway/stuck session, force-stopping"
+      elif [[ "$mine" == "0" && "$open" == "0" ]]; then
         stop_vm "$vm"
       else
-        log "$vm up, mine=$mine open=$open — leaving alone"
+        log "$vm up, mine=$mine open=$open — leaving alone (elapsed ${elapsed}s/${cap}s)"
       fi
     else
       if [[ "$mine" =~ ^[1-9] ]]; then
