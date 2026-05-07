@@ -26,13 +26,16 @@ cd "$HERE"
 # - provisioner_script: provision*.sh that installs the agent layer
 # - env_file: the host-side env file with PRIVATE_KEY/BGIPFS_KEY/etc
 #
-# Tart caps at 2 mac VMs running concurrently — keep AGENTS at ≤2 unless
-# you add coordination logic below.
+# Tart caps at 2 mac VMs running concurrently. AGENTS may exceed 2 — boots
+# happen opportunistically (each tick tries to start any agent whose queue
+# has work; tart rejects beyond the cap and we retry next tick). Idle VMs
+# are stopped on each tick so the cap is freed up as queues drain.
 AGENTS=(
   "4:auditor:provisionAuditorAgent.sh:.env.auditor"
   "5:frontendqa:provisionFrontendQAAgent.sh:.env.frontend-qa"
   "6:builder:provisionBuilderAgent.sh:.env.builder"
   "7:research:provisionResearchAgent.sh:.env.research"
+  "10:feature:provisionFeatureAgent.sh:.env.feature"
 )
 
 INTERVAL="${1:-60}"
@@ -43,10 +46,11 @@ LOG="${LOG:-/tmp/agent-wrangler.log}"
 # Backstop for runaway/stuck claude sessions; tunable per agent type by
 # editing TIME_CAP_<UPPER_VM_NAME>_SECONDS below.
 #
-# Defaults: 2h for builder (matches the playbook's 1.5h budget + 30 min
-# slack), 1h for the others (audit/qa/research are quicker).
+# Defaults: 2h for builder + feature (1.5h playbook budget + 30 min slack),
+# 1h for the others (audit/qa/research are quicker).
 TIME_CAP_DEFAULT_SECONDS="${TIME_CAP_DEFAULT_SECONDS:-3600}"   # 1h
 TIME_CAP_BUILDER_SECONDS="${TIME_CAP_BUILDER_SECONDS:-7200}"   # 2h
+TIME_CAP_FEATURE_SECONDS="${TIME_CAP_FEATURE_SECONDS:-7200}"   # 2h
 
 # Per-VM start-time markers. Used to compute elapsed for the cap.
 STATE_DIR="${TMPDIR:-/tmp}/agent-wrangler"
@@ -60,6 +64,7 @@ log() {
 cap_for() {
   case "$1" in
     builder) echo "$TIME_CAP_BUILDER_SECONDS" ;;
+    feature) echo "$TIME_CAP_FEATURE_SECONDS" ;;
     *)       echo "$TIME_CAP_DEFAULT_SECONDS" ;;
   esac
 }
