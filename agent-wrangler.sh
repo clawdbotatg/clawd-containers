@@ -31,6 +31,7 @@ cd "$HERE"
 AGENTS=(
   "4:auditor:provisionAuditorAgent.sh:.env.auditor"
   "5:frontendqa:provisionFrontendQAAgent.sh:.env.frontend-qa"
+  "6:builder:provisionBuilderAgent.sh:.env.builder"
   "7:research:provisionResearchAgent.sh:.env.research"
 )
 
