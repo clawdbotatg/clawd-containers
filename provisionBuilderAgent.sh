@@ -55,10 +55,19 @@ if ! command -v yarn >/dev/null 2>&1; then
   /opt/homebrew/opt/node@24/bin/corepack enable yarn
 fi
 
+# --- bgipfs CLI (used by the builder's ship script) --------------------
+# scripts/builder/bgipfs-ship.sh shells out to `npx bgipfs upload …`.
+# Install once globally so npx finds it without a per-job network round-trip.
+if ! command -v bgipfs >/dev/null 2>&1; then
+  echo "==> installing bgipfs CLI globally"
+  /opt/homebrew/opt/node@24/bin/npm install -g bgipfs >/dev/null 2>&1 || \
+    echo "  WARN: bgipfs install failed; ship script will fall back to npx on first use"
+fi
+
 # --- install scripts ---------------------------------------------------
-echo "==> installing ~/scripts/{bgipfs,leftclaw}"
+echo "==> installing ~/scripts/{bgipfs,leftclaw,builder}"
 mkdir -p "$HOME/scripts"
-for fam in bgipfs leftclaw; do
+for fam in bgipfs leftclaw builder; do
   src="/tmp/scripts/$fam"
   if [[ -d "$src" ]]; then
     rm -rf "$HOME/scripts/$fam"

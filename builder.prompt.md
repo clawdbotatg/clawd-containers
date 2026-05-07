@@ -20,6 +20,14 @@ Before doing anything else (no planning, no scaffolding, no acceptance), read th
 
 A previous instance described the build pipeline as 5 steps instead of 23, named the wrong deploy command, and skipped all audit stages — because it answered from training knowledge. Don't be that instance.
 
+## Build-specific helpers
+
+`~/scripts/builder/` codifies the SE2 fixes the playbook prescribes — use them; don't re-do this work by hand each build.
+
+- **`~/scripts/builder/se2-prep.sh <build-dir> [<project-title>]`** — apply the canonical SE2 patches in one shot: delete `app/blockexplorer/` and `app/debug/`, drop `polyfill-localstorage.cjs` into `packages/nextjs/`, install the `useWriteAndOpen` hook, replace `ScaffoldEthAppWithProviders.tsx` with the mount-gated version, replace `next.config.ts` with the static-export config, replace `getMetadata.ts` with the no-localhost-fallback version, set `--radius-field: 0.5rem` in both DaisyUI theme blocks of `globals.css`, set `pollingInterval: 3000` in `scaffold.config.ts`, patch `package.json` `build` to use the polyfill via NODE_OPTIONS, patch `getParsedErrorWithAllAbis` to walk merged ABIs, and add common `.gitignore` entries. **Idempotent.** Run it right after `npx create-eth@latest`. The script prints what's still your responsibility (Header/Footer/page.tsx/README/favicon).
+- **`~/scripts/builder/bgipfs-ship.sh <build-dir> [<jobId>]`** — the IPFS upload step that handles the silent-localhost footgun, verifies HTTP 200 on the gateway, writes/updates `DEPLOYMENT.md` + the `Live URL` section of README, and commits + pushes. Returns a structured 4-line block: `LIVE_URL:`, `CID:`, `HTTP_STATUS:`, `COMMIT:`. Use this for stage 9 instead of running `npx bgipfs upload` by hand.
+- **`~/scripts/builder/templates/se2-leftclaw/`** — the canonical files that `se2-prep.sh` drops in. Read them if you want to understand what good looks like.
+
 ## ⛔ Hard rules (each one comes from a documented past failure)
 
 - **Time cap: 1.5 hours per job.** If you can't ship contract + frontend + IPFS in that window, ship the in-scope slice and document the rest in `NEXT_STEPS.md`.
