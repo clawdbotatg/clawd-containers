@@ -36,7 +36,7 @@ git clone https://github.com/clawdbotatg/clawd-containers ~/clawd/clawd-containe
 cd ~/clawd/clawd-containers
 
 ./install.sh                  # brew + tart + sshpass + cont symlink
-brew install foundry          # cast — used by the wrangler's leftclaw scripts
+curl -L https://foundry.paradigm.xyz | bash && ~/.foundry/bin/foundryup    # cast — used by the wrangler's leftclaw scripts
 claude                        # one-time interactive login (writes OAuth to keychain)
 
 scp old-mac:~/clawd/clawd-containers/.env.* .    # bring the five secrets files
@@ -58,7 +58,11 @@ matching job appears (first boot per agent type runs the full provision,
 - **~30 GB free** for the base image, plus ~5–10 GB per VM (APFS clones share
   blocks).
 - **Homebrew, tart, sshpass, foundry** (`install.sh` covers the first three;
-  foundry currently manual).
+  foundry is currently a manual step). The official installer is the most
+  reliable: `curl -L https://foundry.paradigm.xyz | bash && ~/.foundry/bin/foundryup`.
+  `brew install foundry` exists in some homebrew taps but the package name
+  has churned across versions — if your shell can't find `cast` after a
+  brew install, fall back to the curl one.
 - **Claude Code logged in on the host.** `cont provision` reads your OAuth
   token from the keychain and injects it into the VM during provisioning.
   Without it, the agent VMs won't launch Claude.
@@ -115,14 +119,18 @@ scp -p ~/.config/cont/{claude-token,claude-credentials.json,claude-account.json}
 ssh new-mac 'chmod 600 ~/.config/cont/claude-*'
 ```
 
-**One-shot remote bootstrap** (paste-and-run from your laptop):
+**One-shot remote bootstrap** (paste-and-run from your laptop). Assumes
+ssh keys to the new host and the `clawdbotatg/clawd-containers` repo
+being publicly cloneable (it is). If either isn't true, run the
+individual steps from the bootstrap section instead.
 
 ```fish
 scp -p .env.* ~/.config/cont/claude-* new-mac:/tmp/
 ssh -t new-mac '
   git clone https://github.com/clawdbotatg/clawd-containers ~/clawd/clawd-containers &&
   cd ~/clawd/clawd-containers &&
-  ./install.sh && brew install foundry &&
+  ./install.sh &&
+  curl -L https://foundry.paradigm.xyz | bash && ~/.foundry/bin/foundryup &&
   mkdir -p ~/.config/cont && mv /tmp/claude-* ~/.config/cont/ && chmod 600 ~/.config/cont/claude-* &&
   mv /tmp/.env.* . && chmod 600 .env.* &&
   cont pull &&
