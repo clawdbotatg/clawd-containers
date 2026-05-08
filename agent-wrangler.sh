@@ -214,10 +214,11 @@ except Exception:
     fi
     [[ -n "$jid" ]] && meta=$(get_job_meta "$jid" "$env" || true)
   fi
+  local desc
   if [[ -n "$jid" && -n "$meta" ]]; then
-    notify "🟢 ${vm} starting job ${jid}: ${meta}"
+    desc="job ${jid}: ${meta}"
   else
-    notify "🟢 ${vm} starting (type-${svc})"
+    desc="(type-${svc})"
   fi
   local gold="${vm}-gold"
 
@@ -231,10 +232,12 @@ except Exception:
       log "  tart clone $gold failed — falling back to full provision"
       if ! ./cont provision "$vm" "./$prov" >>"$LOG" 2>&1; then
         log "  cont provision failed — see $LOG"
+        notify "🔴 ${vm} failed to start ${desc}"
         return 1
       fi
     elif ! ./cont sync "$vm" "./$prov" >>"$LOG" 2>&1; then
       log "  cont sync failed — see $LOG"
+      notify "🔴 ${vm} failed to start ${desc}"
       return 1
     fi
   else
@@ -243,6 +246,7 @@ except Exception:
     log "  no ${gold} — full provision (run ./bake-agent-gold.sh $vm to enable fast path)"
     if ! ./cont provision "$vm" "./$prov" >>"$LOG" 2>&1; then
       log "  cont provision failed — see $LOG"
+      notify "🔴 ${vm} failed to start ${desc}"
       return 1
     fi
   fi
@@ -252,9 +256,11 @@ except Exception:
   sleep 3
   if ! ./cont up "$vm" >>"$LOG" 2>&1; then
     log "  cont up failed (tart 2-VM cap?) — see $LOG"
+    notify "🔴 ${vm} failed to start ${desc}"
     return 1
   fi
   mark_started "$vm"
+  notify "🟢 ${vm} starting ${desc}"
   # Settle time so claude has Aqua + LaunchAgent + iTerm + scripts up
   # before the next loop iteration sees the queue change.
   sleep 30
