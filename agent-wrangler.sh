@@ -68,6 +68,10 @@ MAX_START_RETRIES="${MAX_START_RETRIES:-3}"
 # start or when the queue becomes empty.
 declare -A START_FAILURES=()
 
+# Telegram dedup buffer: hash -> last-sent-timestamp. Prevents duplicate
+# notifications when multiple wranglers run or retries happen rapidly.
+declare -A NOTIFY_DEDUP=()
+
 log() {
   printf '[%s] %s\n' "$(date '+%F %T')" "$*" | tee -a "$LOG"
 }
@@ -81,6 +85,18 @@ log() {
 notify() {
   local msg="$1"
   [[ -n "${TELEGRAM_BOT_TOKEN:-}" && -n "${TELEGRAM_CHAT_ID:-}" ]] || return 0
+
+  # Deduplicate: skip if this exact message was sent in the last 2 minutes.
+  # Prevents runaway loops when multiple wranglers or rapid retries fire.
+  local hash now last
+  hash=$(printf '%s' "$msg" | shasum -a 256 | awk '{print $1}')
+  now=$(date +%s)
+  last="${NOTIFY_DEDUP[$hash]:-0}"
+  if (( now - last < 120 )); then
+    return 0
+  fi
+  NOTIFY_DEDUP[$hash]=$now
+
   curl -fsS -m 5 -X POST \
     "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
     --data-urlencode "chat_id=${TELEGRAM_CHAT_ID}" \
