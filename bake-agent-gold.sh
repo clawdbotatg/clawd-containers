@@ -60,6 +60,26 @@ fi
 PREP_VM="${AGENT}-prep"
 GOLD="${AGENT}-gold"
 
+# Cleanup on exit: if we didn't end up creating the gold snapshot, the bake
+# failed somewhere between `cont up` and `cont snapshot`. Kill the prep VM
+# so it doesn't sit around eating one of tart's 2 concurrent-VM slots and
+# block the wrangler / next bake attempt.
+cleanup_on_exit() {
+  local rc=$?
+  if tart list 2>/dev/null | awk -v vm="${GOLD}" '$2==vm{f=1} END{exit !f}'; then
+    # Gold exists — bake reached the snapshot step. Nothing to clean up.
+    return
+  fi
+  if tart list 2>/dev/null | awk -v vm="${PREP_VM}" '$2==vm{f=1} END{exit !f}'; then
+    echo "==> cleanup: ${GOLD} not created (exit=$rc); removing ${PREP_VM}" >&2
+    ./cont down "${PREP_VM}" 2>/dev/null || true
+    ./cont rm   "${PREP_VM}" 2>/dev/null || true
+  else
+    echo "==> cleanup: ${GOLD} not created (exit=$rc); no ${PREP_VM} to remove" >&2
+  fi
+}
+trap cleanup_on_exit EXIT
+
 # If the agent's actual VM is currently running (e.g. wrangler picked
 # something up while we're trying to bake), bail rather than racing on
 # tart's 2-VM cap. The wrangler will release the slot when its queue
@@ -79,6 +99,37 @@ echo
 # (likely 'agent-gold': the Tier 1 image with brew + Chrome + iTerm + Claude).
 ./cont rm "${PREP_VM}" 2>/dev/null || true
 ./cont up "${PREP_VM}"
+
+# Fresh-VM ssh isn't actually ready the moment `cont up` returns: launchd
+# is still bringing sshd up, so the first scp from `cont provision` races
+# and dies with "Connection closed by remote host". Settle, then probe
+# until ssh actually answers before handing off to provision.
+echo "==> waiting 30s for ${PREP_VM} to settle..."
+sleep 30
+
+PREP_IP="$(tart ip "${PREP_VM}" --wait 30)"
+echo "==> probing ssh on ${PREP_VM} (${PREP_IP})..."
+SSH_OK=0
+for i in $(seq 1 10); do
+  if sshpass -p admin ssh \
+      -o StrictHostKeyChecking=no \
+      -o UserKnownHostsFile=/dev/null \
+      -o LogLevel=ERROR \
+      -o PreferredAuthentications=password \
+      -o PubkeyAuthentication=no \
+      -o ConnectTimeout=3 \
+      "admin@${PREP_IP}" true 2>/dev/null; then
+    echo "    ssh ready (attempt ${i}/10)"
+    SSH_OK=1
+    break
+  fi
+  echo "    ssh not ready (attempt ${i}/10), sleeping 3s..."
+  sleep 3
+done
+if [ "$SSH_OK" -ne 1 ]; then
+  echo "FAIL: ssh on ${PREP_VM} (${PREP_IP}) not ready after 10 attempts" >&2
+  exit 1
+fi
 
 # Full provision — Tier 2 + Tier 3 both run.
 ./cont provision "${PREP_VM}" "./${PROV}"
