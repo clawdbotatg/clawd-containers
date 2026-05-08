@@ -46,13 +46,23 @@ chmod 600 .env.*
 
 cont pull                     # ~30GB, one-time — the macOS-Tahoe base image
 
+# (optional, recommended) bake per-agent gold images so wrangler boots
+# are ~10s instead of ~60s. Each takes ~3-5 min the first time.
+./bake-agent-gold.sh auditor
+./bake-agent-gold.sh research
+./bake-agent-gold.sh frontendqa
+./bake-agent-gold.sh builder
+./bake-agent-gold.sh feature
+
 nohup ./agent-wrangler.sh 60 >>/tmp/agent-wrangler.out 2>&1 &
 disown
 ```
 
 That's it. The wrangler creates per-agent VMs on demand the first time a
-matching job appears (first boot per agent type runs the full provision,
-~3–5 min; subsequent boots are seconds).
+matching job appears. With per-agent gold baked, each boot is ~10s. Without
+it, the first boot per agent type runs the full provision (~3–5 min);
+subsequent boots are still seconds either way (the slow path's idempotency
+checks skip most work, but the fast path is meaningfully faster).
 
 ### What you actually need
 
@@ -151,6 +161,12 @@ ssh -t new-mac '
 About 90 seconds of human time, then `cont pull` runs unattended (~30 min
 for the 30 GB base image). After that the wrangler is autonomous.
 
+The one-shot above does NOT bake per-agent gold images — those should be
+baked separately once the wrangler is up and you can confirm everything
+works (run `./bake-agent-gold.sh <agent>` once per agent type, while that
+agent's queue is idle). Without baked gold, the wrangler still works
+correctly; boots are just ~60s instead of ~10s.
+
 ---
 
 ## `cont` — VM CLI
@@ -163,7 +179,8 @@ cont pull                    # fetch base image (one-time)
 cont up <name>               # clone base -> name (if missing) and boot headless
 cont ssh <name> [cmd...]     # ssh in (admin/admin); takes optional remote cmd
 cont open <name>             # boot + GUI via VNC (Tahoe workaround, see below)
-cont provision <name> [s]    # boot if needed, scp script in, run it
+cont provision <name> [s]    # boot if needed, scp script in, run it (full)
+cont sync <name> [s]         # same but FAST=1 — skips Tier-2 installs (foundry/gh/yarn/etc)
 cont reset <name>            # delete and recreate from base — clean slate
 cont snapshot <from> <to>    # APFS clone (cheap); pair with `cont base <to>`
 cont base [image]            # show or set the image `up`/`reset` clone from
@@ -328,8 +345,20 @@ provisioner picks what to install where.
 - `install.sh` — host bootstrap (Homebrew, tart, sshpass, `cont` symlink).
 - `provision.sh` — base provisioner (clean mac → ready-to-use mac).
 - `provisionAgent.sh` — Claude Code layer (auth + auto-launch on Aqua login).
-- `provision<Xxx>Agent.sh` — per-agent layer.
-- `agent-wrangler.sh` — host-side daemon.
+  Each install step is gated on `$CONT_PROVISION_FAST` so `cont sync` can
+  skip Tier 2 when a per-agent gold is in use.
+- `provision<Xxx>Agent.sh` — per-agent layer (foundry/gh/yarn/bgipfs +
+  scripts + skills + prompt). Same FAST gating.
+- `bake-agent-gold.sh` — bakes a per-agent gold image (`<agent>-gold`)
+  by running the full provisioner once and snapshotting. Run it once per
+  agent for the fast-boot path; re-run when the agent's toolchain changes.
+- `refresh-skills.sh` — clones / updates the external `skills/evm-audit-skills/`
+  and `skills/pashov-skills/` trees. Required on a fresh checkout; the
+  wrangler also runs it automatically when the local tree is missing or
+  older than 24h (override with `SKILLS_MAX_AGE_HOURS`).
+- `agent-wrangler.sh` — host-side daemon. `start_vm` prefers the fast
+  path (`tart clone <agent>-gold` + `cont sync`) when a per-agent gold
+  exists; falls back to the full provision path when it doesn't.
 - `scripts/leftclaw/` — credentialed wrappers for the leftclaw on-chain API
   (`accept.sh`, `complete.sh`, `get-job.sh`, `list-jobs.sh`, `messages.sh`,
   `my-jobs.sh`, `post-message.sh`, `decline.sh`, `log-work.sh`,
