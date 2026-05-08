@@ -76,6 +76,44 @@ notify() {
     >/dev/null 2>&1 || true
 }
 
+# First open job ID for a service type, or empty string if none / on error.
+# Sources the agent's env file in a subshell so ALCHEMY_API_KEY is scoped.
+get_first_job_id() {
+  local svc="$1" env="$2"
+  ( set -a; source "$env" 2>/dev/null; set +a
+    ./scripts/leftclaw/list-jobs.sh "$svc" 2>/dev/null
+  ) | python3 -c 'import json,sys
+try:
+  d = json.load(sys.stdin)
+  if isinstance(d, list) and d:
+    jid = d[0].get("id")
+    if jid is not None:
+      print(jid)
+except Exception:
+  pass' 2>/dev/null
+}
+
+# One-line "<description-snippet> (<price>)" summary for a job.
+# Price segment is omitted if get-job.sh does not emit one.
+get_job_meta() {
+  local jid="$1" env="$2"
+  ( set -a; source "$env" 2>/dev/null; set +a
+    ./scripts/leftclaw/get-job.sh "$jid" 2>/dev/null
+  ) | python3 -c 'import json,sys
+try:
+  d = json.load(sys.stdin)
+  desc = (d.get("description") or "").strip().replace("\n", " ").replace("\r", " ")
+  if len(desc) > 60:
+    desc = desc[:57].rstrip() + "..."
+  price = d.get("price")
+  if price in (None, ""):
+    print(desc)
+  else:
+    print(f"{desc} ({price})")
+except Exception:
+  pass' 2>/dev/null
+}
+
 # Cap for a given VM name — special-cased for builder, default otherwise.
 cap_for() {
   case "$1" in
@@ -148,8 +186,17 @@ vm_exists() {
 }
 
 start_vm() {
-  local vm="$1" prov="$2" svc="${3:-?}"
-  notify "🟢 ${vm} starting (type-${svc})"
+  local vm="$1" prov="$2" svc="${3:-?}" env="${4:-}"
+  local jid="" meta=""
+  if [[ -n "$env" && -f "$env" ]]; then
+    jid=$(get_first_job_id "$svc" "$env" || true)
+    [[ -n "$jid" ]] && meta=$(get_job_meta "$jid" "$env" || true)
+  fi
+  if [[ -n "$jid" && -n "$meta" ]]; then
+    notify "🟢 ${vm} starting job ${jid}: ${meta}"
+  else
+    notify "🟢 ${vm} starting (type-${svc})"
+  fi
   local gold="${vm}-gold"
 
   if gold_exists "$gold"; then
@@ -270,10 +317,10 @@ while :; do
     else
       if [[ "$mine" =~ ^[1-9] ]]; then
         log "$vm: wallet has $mine assigned/in-progress type-$svc job(s) — booting"
-        start_vm "$vm" "$prov" "$svc" || log "$vm: start failed; will retry next tick"
+        start_vm "$vm" "$prov" "$svc" "$env" || log "$vm: start failed; will retry next tick"
       elif [[ "$open" =~ ^[1-9] ]]; then
         log "$vm: $open open type-$svc job(s) — booting"
-        start_vm "$vm" "$prov" "$svc" || log "$vm: start failed; will retry next tick"
+        start_vm "$vm" "$prov" "$svc" "$env" || log "$vm: start failed; will retry next tick"
       else
         log "$vm: idle (type-$svc mine=$mine open=$open)"
       fi
