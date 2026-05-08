@@ -458,66 +458,76 @@ cmd_provision() {
   ensure_sshpass
   local ip; ip="$(tart ip "$name" --wait 60)"
 
-  # Give the VM a few seconds to settle after reaching the running state
-  # before we hammer it with SCP. Without this the first scp often fails
-  # with "Connection closed".
+  # Fresh-VM ssh isn't actually ready the moment the VM reports running:
+  # launchd is still bringing sshd up, so the first scp races and dies
+  # with "Connection closed by remote host". Settle, then probe until
+  # ssh actually answers before any scp. Same pattern as bake-agent-gold.sh.
+  # Brief settle — just enough for sshd to fully start after boot.
+  # The real reliability fix is SSH multiplexing below (one connection,
+  # reused for all scp/ssh calls, no more sshd rate-limit crashes).
   sleep 5
 
-  # Wait for SSH and probe a few times to make sure the password-auth path
-  # is fully ready before starting the (fragile) recursive SCP operations.
-  echo "==> waiting for ssh on $name ($ip) ..."
-  local _ssh_ok=0
-  for _ in $(seq 1 30); do
+  echo "==> probing ssh on $name ($ip) ..."
+  local _ssh_ok=0 _i
+  for _i in $(seq 1 10); do
     if sshpass -p "$SSH_PASS" ssh \
         -o StrictHostKeyChecking=no \
         -o UserKnownHostsFile=/dev/null \
         -o LogLevel=ERROR \
         -o PreferredAuthentications=password \
         -o PubkeyAuthentication=no \
-        -o ConnectTimeout=2 \
+        -o ConnectTimeout=3 \
         "$SSH_USER@$ip" true 2>/dev/null; then
+      echo "    ssh ready (attempt $_i/10)"
       _ssh_ok=1
       break
     fi
-    sleep 2
+    echo "    ssh not ready (attempt $_i/10), sleeping 3s ..."
+    sleep 3
   done
-
   if [[ "$_ssh_ok" -ne 1 ]]; then
-    echo "error: $name ($ip) never became reachable via SSH" >&2
-    return 1
+    echo "error: ssh on $name ($ip) not ready after 10 attempts" >&2
+    exit 1
   fi
 
-  # Extra probe: run a trivial command a few more times to let SSHD fully
-  # stabilise. This is the same pattern used in bake-agent-gold.sh.
-  for _ in $(seq 1 10); do
-    if sshpass -p "$SSH_PASS" ssh \
-        -o StrictHostKeyChecking=no \
-        -o UserKnownHostsFile=/dev/null \
-        -o LogLevel=ERROR \
-        -o PreferredAuthentications=password \
-        -o PubkeyAuthentication=no \
-        -o ConnectTimeout=2 \
-        "$SSH_USER@$ip" true 2>/dev/null; then
-      break
-    fi
-    sleep 1
-  done
+  # ── SSH multiplexing ──────────────────────────────────────────────────
+  # The old approach opened a fresh TCP+SSH handshake for every single scp
+  # call (~20 individual files + recursive dirs). macOS sshd rate-limits
+  # after that many rapid connections and starts rejecting with
+  # "Permission denied" — the #1 cause of cont sync failures.
+  #
+  # Fix: open ONE master connection via ControlMaster and reuse it for
+  # every subsequent ssh/scp. Faster *and* reliable.
+  local ctl_dir; ctl_dir="$(mktemp -d)"
+  local ctl_path="$ctl_dir/ssh-%r@%h:%p"
+  local -a mux_opts=(
+    -o StrictHostKeyChecking=no
+    -o UserKnownHostsFile=/dev/null
+    -o LogLevel=ERROR
+    -o PreferredAuthentications=password
+    -o PubkeyAuthentication=no
+    -o "ControlMaster=auto"
+    -o "ControlPath=$ctl_path"
+    -o "ControlPersist=120"
+  )
 
-  # Scp the named script *and* any `provision*.sh` siblings in its directory,
-  # each keeping its original basename. This is what makes the cascading
-  # `source "$SELF_DIR/provision.sh"` pattern resolve correctly inside the
-  # VM — provisionAgent.sh / provisionXxxAgent.sh can `source` provision.sh
-  # because they all land in /tmp together.
+  # Establish the master connection
+  echo "==> opening SSH master connection to $name ($ip) ..."
+  sshpass -p "$SSH_PASS" ssh "${mux_opts[@]}" -fN "$SSH_USER@$ip" 2>/dev/null
+  # shellcheck disable=SC2064
+  trap "ssh -o ControlPath='$ctl_path' -O exit '$SSH_USER@$ip' 2>/dev/null; rm -rf '$ctl_dir'" RETURN
+
+  # Helper: ssh/scp through the multiplexed connection (no sshpass needed
+  # after the master is up — the socket handles auth).
+  _mssh()  { ssh  "${mux_opts[@]}" "$SSH_USER@$ip" "$@"; }
+  _mscp()  { scp  "${mux_opts[@]}" "$@" "$SSH_USER@$ip:/tmp/"; }
+  _mscpr() { scp  -r "${mux_opts[@]}" "$@"; }
+
+  # ── Copy files ────────────────────────────────────────────────────────
   local script_dir; script_dir="$(cd "$(dirname "$script")" && pwd)"
   local script_name; script_name="$(basename "$script")"
   local seen_files=" "
   local f fname
-  # Scp the named script + any provision*.sh siblings (so cascading
-  # `source` resolves) + any .env* siblings (so specialized scripts can
-  # install secrets) + any *.prompt.md siblings (so prompt files travel
-  # with their provision scripts). Skip *.example/*.sample template
-  # files. Each file keeps its original basename inside /tmp so
-  # source/include paths line up.
   for f in "$script" "$script_dir"/provision*.sh "$script_dir"/.env* "$script_dir"/*.prompt.md; do
     [[ -f "$f" ]] || continue
     case "$f" in *.example|*.sample) continue ;; esac
@@ -525,37 +535,16 @@ cmd_provision() {
     case "$seen_files" in *" $fname "*) continue ;; esac
     seen_files+="$fname "
     echo "==> copying $fname -> $name:/tmp/$fname ..."
-    sshpass -p "$SSH_PASS" scp \
-      -o StrictHostKeyChecking=no \
-      -o UserKnownHostsFile=/dev/null \
-      -o LogLevel=ERROR \
-      -o PreferredAuthentications=password \
-      -o PubkeyAuthentication=no \
-      "$f" "$SSH_USER@$ip:/tmp/$fname"
+    _mscp "$f"
   done
 
-  # Also scp the scripts/ and skills/ directories if they're siblings of
-  # the named provision script. Specialized provision scripts (e.g.
-  # provisionAuditorAgent.sh) install selected sub-trees from these.
+  # Copy scripts/ and skills/ directories
   local d
   for d in scripts skills; do
     [[ -d "$script_dir/$d" ]] || continue
     echo "==> copying $d/ -> $name:/tmp/$d/ ..."
-    # Wipe any prior copy so re-provisioning doesn't leave stale files.
-    sshpass -p "$SSH_PASS" ssh \
-      -o StrictHostKeyChecking=no \
-      -o UserKnownHostsFile=/dev/null \
-      -o LogLevel=ERROR \
-      -o PreferredAuthentications=password \
-      -o PubkeyAuthentication=no \
-      "$SSH_USER@$ip" "rm -rf /tmp/$d"
-    sshpass -p "$SSH_PASS" scp -r \
-      -o StrictHostKeyChecking=no \
-      -o UserKnownHostsFile=/dev/null \
-      -o LogLevel=ERROR \
-      -o PreferredAuthentications=password \
-      -o PubkeyAuthentication=no \
-      "$script_dir/$d" "$SSH_USER@$ip:/tmp/$d"
+    _mssh "rm -rf /tmp/$d"
+    _mscpr "$script_dir/$d" "$SSH_USER@$ip:/tmp/$d"
   done
 
   # Refresh the host's Claude Code keychain entry (rotates the access token
@@ -576,61 +565,33 @@ cmd_provision() {
   # provision scripts can pick it up and write it to the VM's shell rc.
   if [[ -f "$CLAUDE_TOKEN_FILE" ]]; then
     echo "==> copying claude oauth token -> $name:/tmp/cont-claude-token ..."
-    sshpass -p "$SSH_PASS" scp \
-      -o StrictHostKeyChecking=no \
-      -o UserKnownHostsFile=/dev/null \
-      -o LogLevel=ERROR \
-      -o PreferredAuthentications=password \
-      -o PubkeyAuthentication=no \
-      "$CLAUDE_TOKEN_FILE" "$SSH_USER@$ip:/tmp/cont-claude-token"
+    _mscp "$CLAUDE_TOKEN_FILE"
+    _mssh "mv /tmp/$(basename "$CLAUDE_TOKEN_FILE") /tmp/cont-claude-token"
   fi
 
   # Ship the full keychain credential blob so the agent layer can re-create
-  # the "Claude Code-credentials" entry inside the VM's login keychain. This
-  # is what makes the interactive `claude` UI skip the login screen.
+  # the "Claude Code-credentials" entry inside the VM's login keychain.
   if [[ -f "$CLAUDE_CREDS_FILE" ]]; then
     echo "==> copying claude keychain blob -> $name:/tmp/cont-claude-credentials.json ..."
-    sshpass -p "$SSH_PASS" scp \
-      -o StrictHostKeyChecking=no \
-      -o UserKnownHostsFile=/dev/null \
-      -o LogLevel=ERROR \
-      -o PreferredAuthentications=password \
-      -o PubkeyAuthentication=no \
-      "$CLAUDE_CREDS_FILE" "$SSH_USER@$ip:/tmp/cont-claude-credentials.json"
+    _mscp "$CLAUDE_CREDS_FILE"
+    _mssh "mv /tmp/$(basename "$CLAUDE_CREDS_FILE") /tmp/cont-claude-credentials.json"
   fi
 
-  # Ship the auth-state fields extracted from the host's ~/.claude.json
-  # (oauthAccount, hasCompletedOnboarding, etc). Without these merged in,
-  # claude treats the VM as a brand-new install and shows the login
-  # picker even if the keychain entry exists.
+  # Ship the auth-state fields extracted from the host's ~/.claude.json.
   if [[ -f "$CLAUDE_ACCOUNT_FILE" ]]; then
     echo "==> copying claude account blob -> $name:/tmp/cont-claude-account.json ..."
-    sshpass -p "$SSH_PASS" scp \
-      -o StrictHostKeyChecking=no \
-      -o UserKnownHostsFile=/dev/null \
-      -o LogLevel=ERROR \
-      -o PreferredAuthentications=password \
-      -o PubkeyAuthentication=no \
-      "$CLAUDE_ACCOUNT_FILE" "$SSH_USER@$ip:/tmp/cont-claude-account.json"
+    _mscp "$CLAUDE_ACCOUNT_FILE"
+    _mssh "mv /tmp/$(basename "$CLAUDE_ACCOUNT_FILE") /tmp/cont-claude-account.json"
   fi
 
-  # Forward CONT_PROVISION_FAST through to the remote bash. Set by
-  # `cont sync` to make the provisioners skip all Tier 2 install steps
-  # (foundry, gh, yarn, bgipfs, claude code, brew, etc.) when those are
-  # already baked into a per-agent gold image.
+  # Forward CONT_PROVISION_FAST through to the remote bash.
   local fast_env=""
   if [[ "${CONT_PROVISION_FAST:-}" == "1" ]]; then
     fast_env="CONT_PROVISION_FAST=1 "
   fi
 
   echo "==> running ${fast_env}$script_name in $name ..."
-  sshpass -p "$SSH_PASS" ssh \
-    -o StrictHostKeyChecking=no \
-    -o UserKnownHostsFile=/dev/null \
-    -o LogLevel=ERROR \
-    -o PreferredAuthentications=password \
-    -o PubkeyAuthentication=no \
-    "$SSH_USER@$ip" "${fast_env}bash /tmp/$script_name && sync && sync"
+  _mssh "${fast_env}bash /tmp/$script_name && sync && sync"
 }
 
 # Sync — re-run the per-agent provisioner in FAST mode. Used after cloning
