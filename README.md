@@ -39,6 +39,8 @@ cd ~/clawd/clawd-containers
 curl -L https://foundry.paradigm.xyz | bash && ~/.foundry/bin/foundryup    # cast — used by the wrangler's leftclaw scripts
 claude                        # one-time interactive login (writes OAuth to keychain)
 
+./refresh-skills.sh           # clones skills/evm-audit-skills + skills/pashov-skills (gitignored — not in this repo)
+
 scp old-mac:~/clawd/clawd-containers/.env.* .    # bring the five secrets files
 chmod 600 .env.*
 
@@ -74,6 +76,13 @@ matching job appears (first boot per agent type runs the full provision,
   - `.env.feature` — same as builder
 
   Each `.env.*.example` file in this repo documents the keys with comments.
+
+- **External skill repos cloned into `skills/`.** The auditor agent reads
+  from `skills/evm-audit-skills/` and `skills/pashov-skills/` — both are
+  separate upstream repos, gitignored here, populated by
+  `./refresh-skills.sh`. Run that script once on every fresh clone, and
+  re-run any time you want to pick up upstream skill changes. **The
+  auditor VM will fail to provision without it.**
 
 ### Moving credentials to the new machine
 
@@ -131,6 +140,7 @@ ssh -t new-mac '
   cd ~/clawd/clawd-containers &&
   ./install.sh &&
   curl -L https://foundry.paradigm.xyz | bash && ~/.foundry/bin/foundryup &&
+  ./refresh-skills.sh &&
   mkdir -p ~/.config/cont && mv /tmp/claude-* ~/.config/cont/ && chmod 600 ~/.config/cont/claude-* &&
   mv /tmp/.env.* . && chmod 600 .env.* &&
   cont pull &&
