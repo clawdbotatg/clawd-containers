@@ -1,4 +1,8 @@
 #!/bin/bash
+# Ensure foundry tools (cast) are available — the wrangler runs inside tmux
+# which may not inherit the user's PATH.
+export PATH="$HOME/.foundry/bin:$PATH"
+
 # agent-wrangler.sh — single host-side daemon. Watches leftclaw for any
 # supported job type and spins up the matching worker VM on demand.
 # Stops VMs when idle so nothing runs unless there's actual work.
@@ -186,10 +190,28 @@ vm_exists() {
 }
 
 start_vm() {
-  local vm="$1" prov="$2" svc="${3:-?}" env="${4:-}"
+  local vm="$1" prov="$2" svc="${3:-?}" env="${4:-}" mine="${5:-0}"
   local jid="" meta=""
   if [[ -n "$env" && -f "$env" ]]; then
     jid=$(get_first_job_id "$svc" "$env" || true)
+    # list-jobs.sh only returns OPEN jobs. If we're re-booting for an
+    # already-assigned/in-progress job (mine > 0), fall back to my-jobs.sh
+    # so the notification names the actual job instead of "type-N".
+    if [[ -z "$jid" && "$mine" =~ ^[1-9] ]]; then
+      jid=$(
+        ( set -a; source "$env" 2>/dev/null; set +a
+          ./scripts/leftclaw/my-jobs.sh "$svc" 2>/dev/null
+        ) | python3 -c 'import json,sys
+try:
+  d = json.load(sys.stdin)
+  if isinstance(d, list) and d:
+    jid = d[0].get("id")
+    if jid is not None:
+      print(jid)
+except Exception:
+  pass' 2>/dev/null
+      )
+    fi
     [[ -n "$jid" ]] && meta=$(get_job_meta "$jid" "$env" || true)
   fi
   if [[ -n "$jid" && -n "$meta" ]]; then
@@ -317,10 +339,10 @@ while :; do
     else
       if [[ "$mine" =~ ^[1-9] ]]; then
         log "$vm: wallet has $mine assigned/in-progress type-$svc job(s) — booting"
-        start_vm "$vm" "$prov" "$svc" "$env" || log "$vm: start failed; will retry next tick"
+        start_vm "$vm" "$prov" "$svc" "$env" "$mine" || log "$vm: start failed; will retry next tick"
       elif [[ "$open" =~ ^[1-9] ]]; then
         log "$vm: $open open type-$svc job(s) — booting"
-        start_vm "$vm" "$prov" "$svc" "$env" || log "$vm: start failed; will retry next tick"
+        start_vm "$vm" "$prov" "$svc" "$env" "$mine" || log "$vm: start failed; will retry next tick"
       else
         log "$vm: idle (type-$svc mine=$mine open=$open)"
       fi
