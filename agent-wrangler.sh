@@ -60,6 +60,22 @@ log() {
   printf '[%s] %s\n' "$(date '+%F %T')" "$*" | tee -a "$LOG"
 }
 
+# ── Telegram notifications ──────────────────────────────────────────────
+# Optional. Reads creds from .env.notify (gitignored via .env.* glob).
+# Silent no-op when creds are missing or curl fails — a dropped message
+# must never break the wrangler loop.
+[[ -f .env.notify ]] && source .env.notify || true
+
+notify() {
+  local msg="$1"
+  [[ -n "${TELEGRAM_BOT_TOKEN:-}" && -n "${TELEGRAM_CHAT_ID:-}" ]] || return 0
+  curl -fsS -m 5 -X POST \
+    "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
+    --data-urlencode "chat_id=${TELEGRAM_CHAT_ID}" \
+    --data-urlencode "text=${msg}" \
+    >/dev/null 2>&1 || true
+}
+
 # Cap for a given VM name — special-cased for builder, default otherwise.
 cap_for() {
   case "$1" in
@@ -132,7 +148,8 @@ vm_exists() {
 }
 
 start_vm() {
-  local vm="$1" prov="$2"
+  local vm="$1" prov="$2" svc="${3:-?}"
+  notify "🟢 ${vm} starting (type-${svc})"
   local gold="${vm}-gold"
 
   if gold_exists "$gold"; then
@@ -177,6 +194,7 @@ start_vm() {
 stop_vm() {
   local vm="$1" reason="${2:-idle — no in-progress, no open}"
   log "stopping $vm ($reason)"
+  notify "🔴 ${vm} stopped — ${reason}"
   ./cont down "$vm" >>"$LOG" 2>&1 || true
   clear_started "$vm"
 }
@@ -252,10 +270,10 @@ while :; do
     else
       if [[ "$mine" =~ ^[1-9] ]]; then
         log "$vm: wallet has $mine assigned/in-progress type-$svc job(s) — booting"
-        start_vm "$vm" "$prov" || log "$vm: start failed; will retry next tick"
+        start_vm "$vm" "$prov" "$svc" || log "$vm: start failed; will retry next tick"
       elif [[ "$open" =~ ^[1-9] ]]; then
         log "$vm: $open open type-$svc job(s) — booting"
-        start_vm "$vm" "$prov" || log "$vm: start failed; will retry next tick"
+        start_vm "$vm" "$prov" "$svc" || log "$vm: start failed; will retry next tick"
       else
         log "$vm: idle (type-$svc mine=$mine open=$open)"
       fi
