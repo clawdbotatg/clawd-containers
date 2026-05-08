@@ -148,6 +148,32 @@ stop_vm() {
   clear_started "$vm"
 }
 
+# ── Skills refresh ─────────────────────────────────────────────────────
+# Run ./refresh-skills.sh if skills/ is missing or older than 24h.
+# This is a no-op most of the time; the first clone may take ~30s.
+SKILLS_MAX_AGE_HOURS="${SKILLS_MAX_AGE_HOURS:-24}"
+
+needs_skills_refresh() {
+  # Core skill tree that several agents depend on
+  local marker="skills/evm-audit-skills/.git"
+  [[ -e "$marker" ]] || return 0
+  local age_hours
+  age_hours=$(( ($(date +%s) - $(stat -f %m "$marker" 2>/dev/null || echo 0)) / 3600 ))
+  (( age_hours >= SKILLS_MAX_AGE_HOURS )) && return 0
+  return 1
+}
+
+refresh_skills() {
+  if needs_skills_refresh; then
+    log "skills stale or missing — running ./refresh-skills.sh (this may take ~30s)"
+    if ./refresh-skills.sh >>"$LOG" 2>&1; then
+      log "skills refreshed ok"
+    else
+      log "skills refresh FAILED — agents that depend on skills/ may fail provisioning"
+    fi
+  fi
+}
+
 trap 'log "wrangler exiting"; exit 0' INT TERM
 
 log "agent-wrangler starting — interval=${INTERVAL}s, log=$LOG"
@@ -157,6 +183,8 @@ for entry in "${AGENTS[@]}"; do
 done
 
 while :; do
+  refresh_skills
+
   for entry in "${AGENTS[@]}"; do
     IFS=":" read -r svc vm prov env <<<"$entry"
 
