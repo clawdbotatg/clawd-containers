@@ -107,7 +107,17 @@ has_valid_claude_token() {
   [[ -f "$CLAUDE_TOKEN_FILE" ]] || return 1
   local t; t="$(tr -d '[:space:]' < "$CLAUDE_TOKEN_FILE" 2>/dev/null)"
   # Accept any sk-ant-oat... prefix (e.g. sk-ant-oat01_...).
-  [[ "$t" == sk-ant-oat* ]]
+  [[ "$t" == sk-ant-oat* ]] || return 1
+  # If we have the keychain blob, also gate on expiresAt — a file on disk
+  # with the right prefix tells us nothing about whether the access token
+  # is still live, and stale tokens shipped to a VM fail with 401.
+  [[ -f "$CLAUDE_CREDS_FILE" ]] || return 0
+  python3 - "$CLAUDE_CREDS_FILE" <<'PY' >/dev/null 2>&1 || return 1
+import json, sys, time
+d = json.load(open(sys.argv[1]))
+exp = d.get("claudeAiOauth", {}).get("expiresAt", 0)
+sys.exit(0 if exp and exp/1000 > time.time() else 1)
+PY
 }
 
 # Pull the OAuth token from the host's macOS keychain entry that Claude Code
