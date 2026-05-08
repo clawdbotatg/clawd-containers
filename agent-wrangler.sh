@@ -60,6 +60,14 @@ TIME_CAP_FEATURE_SECONDS="${TIME_CAP_FEATURE_SECONDS:-7200}"   # 2h
 STATE_DIR="${TMPDIR:-/tmp}/agent-wrangler"
 mkdir -p "$STATE_DIR"
 
+# Max consecutive start_vm() failures before we back off and stop retrying
+# until the VM's queue empties (or it eventually starts).
+MAX_START_RETRIES="${MAX_START_RETRIES:-3}"
+
+# Per-VM consecutive start_vm() failure counter. Reset on a successful
+# start or when the queue becomes empty.
+declare -A START_FAILURES=()
+
 log() {
   printf '[%s] %s\n' "$(date '+%F %T')" "$*" | tee -a "$LOG"
 }
@@ -343,14 +351,30 @@ while :; do
         log "$vm up, mine=$mine open=$open — leaving alone (elapsed ${elapsed}s/${cap}s)"
       fi
     else
-      if [[ "$mine" =~ ^[1-9] ]]; then
-        log "$vm: wallet has $mine assigned/in-progress type-$svc job(s) — booting"
-        start_vm "$vm" "$prov" "$svc" "$env" "$mine" || log "$vm: start failed; will retry next tick"
-      elif [[ "$open" =~ ^[1-9] ]]; then
-        log "$vm: $open open type-$svc job(s) — booting"
-        start_vm "$vm" "$prov" "$svc" "$env" "$mine" || log "$vm: start failed; will retry next tick"
+      if [[ "$mine" =~ ^[1-9] || "$open" =~ ^[1-9] ]]; then
+        fails=${START_FAILURES[$vm]:-0}
+        if (( fails >= MAX_START_RETRIES )); then
+          log "$vm: backing off — ${fails} consecutive start failures (will retry when queue empties)"
+        else
+          if [[ "$mine" =~ ^[1-9] ]]; then
+            log "$vm: wallet has $mine assigned/in-progress type-$svc job(s) — booting"
+          else
+            log "$vm: $open open type-$svc job(s) — booting"
+          fi
+          if start_vm "$vm" "$prov" "$svc" "$env" "$mine"; then
+            START_FAILURES[$vm]=0
+          else
+            START_FAILURES[$vm]=$(( fails + 1 ))
+            log "$vm: start failed (${START_FAILURES[$vm]}/${MAX_START_RETRIES}); will retry next tick"
+            if (( ${START_FAILURES[$vm]} >= MAX_START_RETRIES )); then
+              log "WARNING: $vm hit ${MAX_START_RETRIES} consecutive start failures — backing off until queue empties"
+              notify "🔴 ${vm} failed to start ${MAX_START_RETRIES} times in a row — backing off until queue empties"
+            fi
+          fi
+        fi
       else
         log "$vm: idle (type-$svc mine=$mine open=$open)"
+        START_FAILURES[$vm]=0
       fi
     fi
   done
