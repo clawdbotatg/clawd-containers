@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 # Ensure foundry tools (cast) are available — the wrangler runs inside tmux
 # which may not inherit the user's PATH.
 export PATH="$HOME/.foundry/bin:$PATH"
@@ -65,12 +65,33 @@ mkdir -p "$STATE_DIR"
 MAX_START_RETRIES="${MAX_START_RETRIES:-3}"
 
 # Per-VM consecutive start_vm() failure counter. Reset on a successful
-# start or when the queue becomes empty.
-declare -A START_FAILURES=()
+# start or when the queue becomes empty. Stored as "<vm> <count>" lines
+# in a flat file (bash 3.2 on macOS lacks associative arrays).
+FAILURES_FILE="$STATE_DIR/failures.txt"
 
 # Telegram dedup buffer: hash -> last-sent-timestamp. Prevents duplicate
 # notifications when multiple wranglers run or retries happen rapidly.
-declare -A NOTIFY_DEDUP=()
+# Stored as "<hash> <timestamp>" lines in a flat file.
+NOTIFY_DEDUP_FILE="$STATE_DIR/notify_dedup.txt"
+
+# Read a numeric value keyed by $1 from flat file $2. Echoes 0 if missing.
+kv_get() {
+  local key="$1" file="$2"
+  [[ -f "$file" ]] || { echo 0; return; }
+  local val
+  val=$(grep "^${key} " "$file" 2>/dev/null | tail -1 | awk '{print $2}')
+  echo "${val:-0}"
+}
+
+# Set value $2 for key $1 in flat file $3 (replacing any prior entry).
+kv_set() {
+  local key="$1" val="$2" file="$3"
+  touch "$file"
+  local tmp="$file.tmp"
+  grep -v "^${key} " "$file" > "$tmp" 2>/dev/null || true
+  echo "${key} ${val}" >> "$tmp"
+  mv "$tmp" "$file"
+}
 
 log() {
   printf '[%s] %s\n' "$(date '+%F %T')" "$*" | tee -a "$LOG"
@@ -91,11 +112,11 @@ notify() {
   local hash now last
   hash=$(printf '%s' "$msg" | shasum -a 256 | awk '{print $1}')
   now=$(date +%s)
-  last="${NOTIFY_DEDUP[$hash]:-0}"
+  last=$(kv_get "$hash" "$NOTIFY_DEDUP_FILE")
   if (( now - last < 120 )); then
     return 0
   fi
-  NOTIFY_DEDUP[$hash]=$now
+  kv_set "$hash" "$now" "$NOTIFY_DEDUP_FILE"
 
   curl -fsS -m 5 -X POST \
     "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
@@ -368,7 +389,7 @@ while :; do
       fi
     else
       if [[ "$mine" =~ ^[1-9] || "$open" =~ ^[1-9] ]]; then
-        fails=${START_FAILURES[$vm]:-0}
+        fails=$(kv_get "$vm" "$FAILURES_FILE")
         if (( fails >= MAX_START_RETRIES )); then
           log "$vm: backing off — ${fails} consecutive start failures (will retry when queue empties)"
         else
@@ -378,11 +399,12 @@ while :; do
             log "$vm: $open open type-$svc job(s) — booting"
           fi
           if start_vm "$vm" "$prov" "$svc" "$env" "$mine"; then
-            START_FAILURES[$vm]=0
+            kv_set "$vm" 0 "$FAILURES_FILE"
           else
-            START_FAILURES[$vm]=$(( fails + 1 ))
-            log "$vm: start failed (${START_FAILURES[$vm]}/${MAX_START_RETRIES}); will retry next tick"
-            if (( ${START_FAILURES[$vm]} >= MAX_START_RETRIES )); then
+            new_fails=$(( fails + 1 ))
+            kv_set "$vm" "$new_fails" "$FAILURES_FILE"
+            log "$vm: start failed (${new_fails}/${MAX_START_RETRIES}); will retry next tick"
+            if (( new_fails >= MAX_START_RETRIES )); then
               log "WARNING: $vm hit ${MAX_START_RETRIES} consecutive start failures — backing off until queue empties"
               notify "🔴 ${vm} failed to start ${MAX_START_RETRIES} times in a row — backing off until queue empties"
             fi
@@ -390,7 +412,7 @@ while :; do
         fi
       else
         log "$vm: idle (type-$svc mine=$mine open=$open)"
-        START_FAILURES[$vm]=0
+        kv_set "$vm" 0 "$FAILURES_FILE"
       fi
     fi
   done
