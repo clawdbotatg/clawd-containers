@@ -2,7 +2,17 @@
 # provision.sh — runs INSIDE a cont VM via `./cont provision <vm>`.
 # Idempotent — safe to re-run. Edit to taste; this matches a customized
 # "browse + terminal" setup.
+#
+# FAST mode (CONT_PROVISION_FAST=1, set by `cont sync`): everything in this
+# file is Tier 1 — already baked into the gold image — so we skip the whole
+# body. Only the volatile per-job state (scripts, skills, env, prompt,
+# Claude OAuth) gets refreshed by the layers above.
 set -euo pipefail
+
+if [[ "${CONT_PROVISION_FAST:-}" == "1" ]]; then
+  echo "==> provision.sh: FAST mode — skip (Tier 1 baked into gold)"
+  return 0 2>/dev/null || exit 0
+fi
 
 echo "==> provisioning $(whoami)@$(hostname) ($(sw_vers -productName) $(sw_vers -productVersion))"
 

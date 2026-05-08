@@ -225,6 +225,41 @@ The pattern across all five agents:
    root. Copied into the VM as `~/<agent>.prompt.md` and fed to Claude
    Code via the startup wrapper. Edit a prompt, re-provision, done.
 
+### Per-agent gold images (fast boot)
+
+By default the wrangler clones each VM from the generic `agent-gold`
+image (clean mac + Homebrew + Chrome + iTerm + Claude Code) and runs
+the FULL provisioner on top — reinstalling foundry / yarn / bgipfs /
+gh / etc. every boot. That's ~30–60s of wasted work per VM start.
+
+The fix is per-agent gold images. Each contains the agent's full Tier 1
++ Tier 2 toolchain. The wrangler clones from there and only `cont sync`'s
+the volatile Tier 3 state (scripts, skills, env, prompt, OAuth) on each
+boot — ~10s instead of ~60s.
+
+**Bake one per agent (one-time, redo when toolchain changes):**
+
+```fish
+./bake-agent-gold.sh auditor
+./bake-agent-gold.sh builder
+./bake-agent-gold.sh feature
+./bake-agent-gold.sh frontendqa
+./bake-agent-gold.sh research
+```
+
+The wrangler picks them up automatically — `start_vm` checks for
+`<agent>-gold` and falls back to the full provision path if missing.
+So you can roll out per-agent golds incrementally; nothing breaks
+during the transition.
+
+Re-bake when:
+- The agent's `provisionXxxAgent.sh` adds a new install step.
+- A baked-in package needs a version bump.
+- The brew package list in `provision.sh` changes.
+
+Tier 3 changes (script edits, skill updates, prompt tweaks, env rotation)
+do NOT need a re-bake — `cont sync` handles those on every boot.
+
 ### `agent-wrangler.sh`
 
 A single host-side daemon. Watches leftclaw for any registered service

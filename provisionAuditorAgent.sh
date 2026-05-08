@@ -25,10 +25,10 @@ source "$SELF_DIR/provisionAgent.sh"
 
 echo "==> auditor layer: $(whoami)@$(hostname)"
 
-# --- foundry (provides `cast`) -----------------------------------------
+# --- foundry (provides `cast`) — Tier 2, baked into auditor-gold --------
 # leftclaw scripts use `cast` for on-chain reads (getJob) and writes
 # (acceptJob, completeJob). Install via the official one-liner if missing.
-if ! command -v cast >/dev/null 2>&1; then
+if [[ "${CONT_PROVISION_FAST:-}" != "1" ]] && ! command -v cast >/dev/null 2>&1; then
   echo "==> installing foundry (cast/forge/anvil)"
   curl -fsSL https://foundry.paradigm.xyz | bash
   # foundryup is installed at ~/.foundry/bin/foundryup; run it to fetch the toolchain.

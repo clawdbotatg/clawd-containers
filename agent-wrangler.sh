@@ -121,13 +121,46 @@ vm_running() {
        | awk -v vm="$vm" '$2==vm && $NF=="running"{f=1} END{exit !f}'
 }
 
+# Does a per-agent gold image exist? Fast path uses it.
+gold_exists() {
+  tart list --quiet --source local 2>/dev/null | grep -Fxq "$1"
+}
+
+# Does a VM exist (any state)?
+vm_exists() {
+  tart list --quiet --source local 2>/dev/null | grep -Fxq "$1"
+}
+
 start_vm() {
   local vm="$1" prov="$2"
-  log "  re-provisioning $vm with ./$prov"
-  if ! ./cont provision "$vm" "./$prov" >>"$LOG" 2>&1; then
-    log "  cont provision failed — see $LOG"
-    return 1
+  local gold="${vm}-gold"
+
+  if gold_exists "$gold"; then
+    # Fast path: clone per-agent gold (Tier 1+2 baked) and sync Tier 3.
+    log "  fast path: cloning ${gold} -> ${vm} + sync"
+    if vm_exists "$vm"; then
+      ./cont rm "$vm" >>"$LOG" 2>&1 || true
+    fi
+    if ! tart clone "$gold" "$vm" >>"$LOG" 2>&1; then
+      log "  tart clone $gold failed — falling back to full provision"
+      if ! ./cont provision "$vm" "./$prov" >>"$LOG" 2>&1; then
+        log "  cont provision failed — see $LOG"
+        return 1
+      fi
+    elif ! ./cont sync "$vm" "./$prov" >>"$LOG" 2>&1; then
+      log "  cont sync failed — see $LOG"
+      return 1
+    fi
+  else
+    # Slow path: no per-agent gold yet. Run the full provisioner.
+    # Run ./bake-agent-gold.sh $vm to build one and speed up future boots.
+    log "  no ${gold} — full provision (run ./bake-agent-gold.sh $vm to enable fast path)"
+    if ! ./cont provision "$vm" "./$prov" >>"$LOG" 2>&1; then
+      log "  cont provision failed — see $LOG"
+      return 1
+    fi
   fi
+
   log "  bouncing $vm so fresh Aqua login fires the LaunchAgent"
   ./cont down "$vm" >>"$LOG" 2>&1 || true
   sleep 3

@@ -24,9 +24,9 @@ source "$SELF_DIR/provisionAgent.sh"
 
 echo "==> research layer: $(whoami)@$(hostname)"
 
-# --- foundry (provides `cast`) -----------------------------------------
+# --- foundry (provides `cast`) — Tier 2, baked into research-gold -------
 # Research jobs often cite on-chain data; cast is how we read it.
-if ! command -v cast >/dev/null 2>&1; then
+if [[ "${CONT_PROVISION_FAST:-}" != "1" ]] && ! command -v cast >/dev/null 2>&1; then
   echo "==> installing foundry (cast/forge/anvil)"
   curl -fsSL https://foundry.paradigm.xyz | bash
   "$HOME/.foundry/bin/foundryup"

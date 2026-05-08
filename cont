@@ -574,14 +574,31 @@ cmd_provision() {
       "$CLAUDE_ACCOUNT_FILE" "$SSH_USER@$ip:/tmp/cont-claude-account.json"
   fi
 
-  echo "==> running $script_name in $name ..."
+  # Forward CONT_PROVISION_FAST through to the remote bash. Set by
+  # `cont sync` to make the provisioners skip all Tier 2 install steps
+  # (foundry, gh, yarn, bgipfs, claude code, brew, etc.) when those are
+  # already baked into a per-agent gold image.
+  local fast_env=""
+  if [[ "${CONT_PROVISION_FAST:-}" == "1" ]]; then
+    fast_env="CONT_PROVISION_FAST=1 "
+  fi
+
+  echo "==> running ${fast_env}$script_name in $name ..."
   sshpass -p "$SSH_PASS" ssh \
     -o StrictHostKeyChecking=no \
     -o UserKnownHostsFile=/dev/null \
     -o LogLevel=ERROR \
     -o PreferredAuthentications=password \
     -o PubkeyAuthentication=no \
-    "$SSH_USER@$ip" "bash /tmp/$script_name && sync && sync"
+    "$SSH_USER@$ip" "${fast_env}bash /tmp/$script_name && sync && sync"
+}
+
+# Sync — re-run the per-agent provisioner in FAST mode. Used after cloning
+# a per-agent gold image, when only the volatile per-job state (scripts,
+# skills, env, prompt, Claude OAuth) needs refreshing. Same arguments as
+# `cont provision`. ~5–10s vs ~30–60s for a full provision.
+cmd_sync() {
+  CONT_PROVISION_FAST=1 cmd_provision "$@"
 }
 
 cmd_spec() {
@@ -653,6 +670,8 @@ cont — programmatic macOS-on-macOS environments via tart
   cont ssh <name> [cmd...]    ssh in (admin/admin)
   cont open <name>            boot if needed and bring GUI window to front
   cont provision <name> [s]   boot if needed, scp script in, run it (default: ./provision.sh)
+  cont sync <name> [s]        same as provision but FAST=1 (skip Tier-2 installs;
+                              expects per-agent gold image to already have them)
   cont spec <name>            show spec + live config
   cont spec <name> k=v ...    set keys (cpu memory display disk); applies if stopped
   cont spec <name> edit       open spec file in $EDITOR
@@ -677,6 +696,7 @@ main() {
     ssh|shell)cmd_ssh "$@" ;;
     open|gui) cmd_open "$@" ;;
     provision)cmd_provision "$@" ;;
+    sync)     cmd_sync "$@" ;;
     spec)     cmd_spec "$@" ;;
     ""|-h|--help|help) usage ;;
     *) echo "unknown: $cmd" >&2; usage; exit 2 ;;

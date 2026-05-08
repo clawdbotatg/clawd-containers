@@ -20,23 +20,26 @@ source "$SELF_DIR/provision.sh"
 
 echo "==> agent layer: $(whoami)@$(hostname) ($(sw_vers -productName) $(sw_vers -productVersion))"
 
-# --- Claude Code ---------------------------------------------------------
-if [[ ! -x "$HOME/.local/bin/claude" ]]; then
-  echo "==> installing Claude Code ..."
-  curl -fsSL https://claude.ai/install.sh | bash
-fi
-
-# Ensure ~/.local/bin is on PATH for both login (.zprofile, sourced by
-# Terminal.app/iTerm) and interactive (.zshrc) zsh shells. The cirruslabs
-# base image ships .zprofile but no .zshrc, so we *append* to the former
-# (it already sets up brew + node) and *create* the latter.
+# --- Tier 2 setup (skip in FAST mode — already baked into gold) ---------
 RC_FILES=("$HOME/.zprofile" "$HOME/.zshrc")
-for rc in "${RC_FILES[@]}"; do
-  if ! grep -qs '\.local/bin' "$rc" 2>/dev/null; then
-    echo "==> adding ~/.local/bin to PATH in $rc"
-    echo 'export PATH="$HOME/.local/bin:$PATH"' >> "$rc"
+if [[ "${CONT_PROVISION_FAST:-}" != "1" ]]; then
+  # --- Claude Code -------------------------------------------------------
+  if [[ ! -x "$HOME/.local/bin/claude" ]]; then
+    echo "==> installing Claude Code ..."
+    curl -fsSL https://claude.ai/install.sh | bash
   fi
-done
+
+  # Ensure ~/.local/bin is on PATH for both login (.zprofile, sourced by
+  # Terminal.app/iTerm) and interactive (.zshrc) zsh shells. The cirruslabs
+  # base image ships .zprofile but no .zshrc, so we *append* to the former
+  # (it already sets up brew + node) and *create* the latter.
+  for rc in "${RC_FILES[@]}"; do
+    if ! grep -qs '\.local/bin' "$rc" 2>/dev/null; then
+      echo "==> adding ~/.local/bin to PATH in $rc"
+      echo 'export PATH="$HOME/.local/bin:$PATH"' >> "$rc"
+    fi
+  done
+fi
 export PATH="$HOME/.local/bin:$PATH"
 
 # --- Claude OAuth credentials (injected by `cont provision` from the host)
@@ -174,18 +177,22 @@ fi
 # `claude --chrome "gm"`. Going via Dynamic Profile avoids the macOS
 # "OK to run this script?" LaunchServices prompt that fires when iTerm
 # opens a `.command` file directly.
+#
+# Tier 2 — stable infrastructure baked into agent-gold. Skip in FAST mode.
+# (Per-agent provisioners overwrite the wrapper script with their own
+# prompt-loading version; that's done unconditionally below.)
+if [[ "${CONT_PROVISION_FAST:-}" != "1" ]]; then
+  echo "==> installing claude-startup wrapper, iTerm dynamic profile, LaunchAgent"
 
-echo "==> installing claude-startup wrapper, iTerm dynamic profile, LaunchAgent"
+  mkdir -p \
+    "$HOME/.local/bin" \
+    "$HOME/Library/LaunchAgents" \
+    "$HOME/Library/Application Support/iTerm2/DynamicProfiles"
 
-mkdir -p \
-  "$HOME/.local/bin" \
-  "$HOME/Library/LaunchAgents" \
-  "$HOME/Library/Application Support/iTerm2/DynamicProfiles"
-
-# Wrapper. iTerm execs this as the session command, so it must source
-# .zprofile to get PATH (iTerm doesn't inherit launchd's env into the
-# child process for custom-command profiles).
-cat > "$HOME/.local/bin/claude-startup.sh" <<'EOSH'
+  # Wrapper. iTerm execs this as the session command, so it must source
+  # .zprofile to get PATH (iTerm doesn't inherit launchd's env into the
+  # child process for custom-command profiles).
+  cat > "$HOME/.local/bin/claude-startup.sh" <<'EOSH'
 #!/bin/bash
 # This VM is the sandbox — give claude full reign. The flag is documented
 # as "Recommended only for sandboxes with no internet access," but a
@@ -193,13 +200,13 @@ cat > "$HOME/.local/bin/claude-startup.sh" <<'EOSH'
 source "$HOME/.zprofile" 2>/dev/null || true
 exec "$HOME/.local/bin/claude" --dangerously-skip-permissions --chrome "gm"
 EOSH
-chmod 755 "$HOME/.local/bin/claude-startup.sh"
+  chmod 755 "$HOME/.local/bin/claude-startup.sh"
 
-# Dynamic Profile — fixed Guid so re-provisioning updates rather than
-# duplicating. Setting Default Bookmark Guid below makes iTerm use this
-# profile for new windows on launch.
-PROFILE_GUID="claude-startup-cont-fixed"
-cat > "$HOME/Library/Application Support/iTerm2/DynamicProfiles/claude-startup.json" <<EOPROF
+  # Dynamic Profile — fixed Guid so re-provisioning updates rather than
+  # duplicating. Setting Default Bookmark Guid below makes iTerm use this
+  # profile for new windows on launch.
+  PROFILE_GUID="claude-startup-cont-fixed"
+  cat > "$HOME/Library/Application Support/iTerm2/DynamicProfiles/claude-startup.json" <<EOPROF
 {
   "Profiles": [
     {
@@ -214,13 +221,13 @@ cat > "$HOME/Library/Application Support/iTerm2/DynamicProfiles/claude-startup.j
 }
 EOPROF
 
-# Make claude-startup the default profile for new iTerm windows.
-defaults write com.googlecode.iterm2 "Default Bookmark Guid" -string "$PROFILE_GUID"
+  # Make claude-startup the default profile for new iTerm windows.
+  defaults write com.googlecode.iterm2 "Default Bookmark Guid" -string "$PROFILE_GUID"
 
-# LaunchAgent: just open iTerm at login. No script argument => no
-# LaunchServices "OK to run this script?" prompt. iTerm opens a window
-# with the default profile, which runs claude --chrome "gm".
-cat > "$HOME/Library/LaunchAgents/com.cont.claude-startup.plist" <<EOPLIST
+  # LaunchAgent: just open iTerm at login. No script argument => no
+  # LaunchServices "OK to run this script?" prompt. iTerm opens a window
+  # with the default profile, which runs claude --chrome "gm".
+  cat > "$HOME/Library/LaunchAgents/com.cont.claude-startup.plist" <<EOPLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -240,11 +247,12 @@ cat > "$HOME/Library/LaunchAgents/com.cont.claude-startup.plist" <<EOPLIST
 </dict>
 </plist>
 EOPLIST
-chmod 644 "$HOME/Library/LaunchAgents/com.cont.claude-startup.plist"
+  chmod 644 "$HOME/Library/LaunchAgents/com.cont.claude-startup.plist"
 
-# Clean up the .command file from earlier iterations of this script so
-# stale stuff doesn't accumulate.
-rm -f "$HOME/.local/bin/claude-startup.command"
+  # Clean up the .command file from earlier iterations of this script so
+  # stale stuff doesn't accumulate.
+  rm -f "$HOME/.local/bin/claude-startup.command"
+fi
 
 # --- Final auth sanity check --------------------------------------------
 # Single source-of-truth verification: run a tiny non-interactive claude

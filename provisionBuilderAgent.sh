@@ -27,41 +27,42 @@ source "$SELF_DIR/provisionAgent.sh"
 
 echo "==> builder layer: $(whoami)@$(hostname)"
 
-# --- foundry (provides cast/forge/anvil) -------------------------------
-if ! command -v cast >/dev/null 2>&1; then
-  echo "==> installing foundry"
-  curl -fsSL https://foundry.paradigm.xyz | bash
-  "$HOME/.foundry/bin/foundryup"
-  for rc in "${RC_FILES[@]}"; do
-    if ! grep -qs '\.foundry/bin' "$rc" 2>/dev/null; then
-      echo 'export PATH="$HOME/.foundry/bin:$PATH"' >> "$rc"
-    fi
-  done
-  export PATH="$HOME/.foundry/bin:$PATH"
-fi
+# --- Tier 2 toolchain (skip in FAST mode — baked into builder-gold) ----
+if [[ "${CONT_PROVISION_FAST:-}" != "1" ]]; then
+  # foundry (provides cast/forge/anvil)
+  if ! command -v cast >/dev/null 2>&1; then
+    echo "==> installing foundry"
+    curl -fsSL https://foundry.paradigm.xyz | bash
+    "$HOME/.foundry/bin/foundryup"
+    for rc in "${RC_FILES[@]}"; do
+      if ! grep -qs '\.foundry/bin' "$rc" 2>/dev/null; then
+        echo 'export PATH="$HOME/.foundry/bin:$PATH"' >> "$rc"
+      fi
+    done
+    export PATH="$HOME/.foundry/bin:$PATH"
+  fi
 
-# --- gh CLI ------------------------------------------------------------
-# The builder pushes generated code to GitHub and files audit issues.
-if ! command -v gh >/dev/null 2>&1; then
-  echo "==> installing gh"
-  /opt/homebrew/bin/brew install gh
-fi
+  # gh CLI — the builder pushes generated code to GitHub and files audit issues.
+  if ! command -v gh >/dev/null 2>&1; then
+    echo "==> installing gh"
+    /opt/homebrew/bin/brew install gh
+  fi
 
-# --- yarn via corepack -------------------------------------------------
-# Scaffold-ETH 2 expects yarn berry. corepack ships with node@24, just
-# needs to be activated.
-if ! command -v yarn >/dev/null 2>&1; then
-  echo "==> activating yarn via corepack"
-  /opt/homebrew/opt/node@24/bin/corepack enable yarn
-fi
+  # yarn via corepack — Scaffold-ETH 2 expects yarn berry. corepack ships
+  # with node@24, just needs to be activated.
+  if ! command -v yarn >/dev/null 2>&1; then
+    echo "==> activating yarn via corepack"
+    /opt/homebrew/opt/node@24/bin/corepack enable yarn
+  fi
 
-# --- bgipfs CLI (used by the builder's ship script) --------------------
-# scripts/builder/bgipfs-ship.sh shells out to `npx bgipfs upload …`.
-# Install once globally so npx finds it without a per-job network round-trip.
-if ! command -v bgipfs >/dev/null 2>&1; then
-  echo "==> installing bgipfs CLI globally"
-  /opt/homebrew/opt/node@24/bin/npm install -g bgipfs >/dev/null 2>&1 || \
-    echo "  WARN: bgipfs install failed; ship script will fall back to npx on first use"
+  # bgipfs CLI — scripts/builder/bgipfs-ship.sh shells out to
+  # `npx bgipfs upload …`. Install once globally so npx finds it without
+  # a per-job network round-trip.
+  if ! command -v bgipfs >/dev/null 2>&1; then
+    echo "==> installing bgipfs CLI globally"
+    /opt/homebrew/opt/node@24/bin/npm install -g bgipfs >/dev/null 2>&1 || \
+      echo "  WARN: bgipfs install failed; ship script will fall back to npx on first use"
+  fi
 fi
 
 # --- install scripts ---------------------------------------------------
