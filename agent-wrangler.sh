@@ -93,6 +93,15 @@ kv_set() {
   mv "$tmp" "$file"
 }
 
+# Wipe the failures file so every VM starts the next tick at 0. Called
+# whenever a slot frees up (any stop_vm) — without this, a VM that hit
+# MAX_START_RETRIES while another VM was hogging a slot would stay
+# backed-off forever, since the back-off only clears when its own queue
+# empties. Resetting on slot turnover gives all agents a fair retry.
+reset_all_failures() {
+  : > "$FAILURES_FILE"
+}
+
 log() {
   printf '[%s] %s\n' "$(date '+%F %T')" "$*" | tee -a "$LOG"
 }
@@ -317,6 +326,8 @@ stop_vm() {
   notify "🔴 ${vm} stopped — ${reason}"
   ./cont down "$vm" >>"$LOG" 2>&1 || true
   clear_started "$vm"
+  reset_all_failures
+  log "  reset all failure counters — slot freed, backed-off agents get a fresh shot"
 }
 
 # ── Skills refresh ─────────────────────────────────────────────────────
