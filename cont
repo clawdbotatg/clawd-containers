@@ -458,8 +458,38 @@ cmd_provision() {
   ensure_sshpass
   local ip; ip="$(tart ip "$name" --wait 60)"
 
+  # Give the VM a few seconds to settle after reaching the running state
+  # before we hammer it with SCP. Without this the first scp often fails
+  # with "Connection closed".
+  sleep 5
+
+  # Wait for SSH and probe a few times to make sure the password-auth path
+  # is fully ready before starting the (fragile) recursive SCP operations.
   echo "==> waiting for ssh on $name ($ip) ..."
+  local _ssh_ok=0
   for _ in $(seq 1 30); do
+    if sshpass -p "$SSH_PASS" ssh \
+        -o StrictHostKeyChecking=no \
+        -o UserKnownHostsFile=/dev/null \
+        -o LogLevel=ERROR \
+        -o PreferredAuthentications=password \
+        -o PubkeyAuthentication=no \
+        -o ConnectTimeout=2 \
+        "$SSH_USER@$ip" true 2>/dev/null; then
+      _ssh_ok=1
+      break
+    fi
+    sleep 2
+  done
+
+  if [[ "$_ssh_ok" -ne 1 ]]; then
+    echo "error: $name ($ip) never became reachable via SSH" >&2
+    return 1
+  fi
+
+  # Extra probe: run a trivial command a few more times to let SSHD fully
+  # stabilise. This is the same pattern used in bake-agent-gold.sh.
+  for _ in $(seq 1 10); do
     if sshpass -p "$SSH_PASS" ssh \
         -o StrictHostKeyChecking=no \
         -o UserKnownHostsFile=/dev/null \
@@ -470,7 +500,7 @@ cmd_provision() {
         "$SSH_USER@$ip" true 2>/dev/null; then
       break
     fi
-    sleep 2
+    sleep 1
   done
 
   # Scp the named script *and* any `provision*.sh` siblings in its directory,
