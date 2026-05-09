@@ -410,6 +410,13 @@ while :; do
         if (( fails >= MAX_START_RETRIES )); then
           log "$vm: backing off — ${fails} consecutive start failures (will retry when queue empties)"
         else
+          # Check VM slot availability BEFORE attempting to boot.
+          # tart caps at 2 concurrent VMs; don't waste a retry on a guaranteed failure.
+          local _running; _running=$(tart list 2>/dev/null | grep -c "running" || echo 0)
+          if (( _running >= 2 )); then
+            log "$vm: no VM slot available (${_running}/2 running) — skipping this tick"
+            continue
+          fi
           if [[ "$mine" =~ ^[1-9] ]]; then
             log "$vm: wallet has $mine assigned/in-progress type-$svc job(s) — booting"
           else
