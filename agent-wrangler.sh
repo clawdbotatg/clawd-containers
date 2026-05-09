@@ -64,6 +64,13 @@ mkdir -p "$STATE_DIR"
 # until the VM's queue empties (or it eventually starts).
 MAX_START_RETRIES="${MAX_START_RETRIES:-3}"
 
+# Maximum concurrent tart VMs the host can run. Apple Silicon's
+# Virtualization framework documents a cap of 2 for arm64 macOS guests,
+# but on some hosts the effective cap is 1 (other virtualization tools
+# running, hardware/OS variation). Default to 1 — override with
+# MAX_VMS=2 if your host confirms it can run two.
+MAX_VMS="${MAX_VMS:-1}"
+
 # Per-VM consecutive start_vm() failure counter. Reset on a successful
 # start or when the queue becomes empty. Stored as "<vm> <count>" lines
 # in a flat file (bash 3.2 on macOS lacks associative arrays).
@@ -411,10 +418,10 @@ while :; do
           log "$vm: backing off — ${fails} consecutive start failures (will retry when queue empties)"
         else
           # Check VM slot availability BEFORE attempting to boot.
-          # tart caps at 2 concurrent VMs; don't waste a retry on a guaranteed failure.
-          local _running; _running=$(tart list 2>/dev/null | grep -c "running" || echo 0)
-          if (( _running >= 2 )); then
-            log "$vm: no VM slot available (${_running}/2 running) — skipping this tick"
+          # Skip the boot when MAX_VMS is hit instead of consuming a retry.
+          _running=$(tart list 2>/dev/null | awk '/running/{n++} END{print n+0}')
+          if (( _running >= MAX_VMS )); then
+            log "$vm: no VM slot available (${_running}/${MAX_VMS} running) — skipping this tick"
             continue
           fi
           if [[ "$mine" =~ ^[1-9] ]]; then
