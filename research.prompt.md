@@ -40,7 +40,7 @@ Work through your queue: finish anything in progress first, then pick up new res
    - 5–10 sub-questions the report needs to address
    - The primary-source categories you'll consult
 
-5. **Do the research per `~/skills/research/SKILL.md`.** Read the provided URLs first. Triangulate non-trivial claims. Use on-chain reads (`cast`) when relevant. Use the Chrome integration for dynamic sites. Take notes as you go in `~/research/<job_id>/notes.md`.
+5. **Do the research per `~/skills/research/SKILL.md`.** Read the provided URLs first. Triangulate non-trivial claims. Use on-chain reads (`cast`) when relevant. Use `WebFetch` and `WebSearch` for browsing — the Chrome integration is intentionally disabled in this VM. Take notes as you go in `~/research/<job_id>/notes.md`.
 
 6. **Log progress** as you finish major research milestones:
    ```

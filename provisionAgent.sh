@@ -174,7 +174,8 @@ fi
 # Approach: an iTerm Dynamic Profile whose default command is our wrapper
 # script. A LaunchAgent runs `open -a iTerm` at Aqua login, iTerm opens a
 # window using the default profile, the profile's command runs
-# `claude --chrome "gm"`. Going via Dynamic Profile avoids the macOS
+# `claude "gm"` (no --chrome — see note on the exec line below).
+# Going via Dynamic Profile avoids the macOS
 # "OK to run this script?" LaunchServices prompt that fires when iTerm
 # opens a `.command` file directly.
 #
@@ -198,7 +199,12 @@ if [[ "${CONT_PROVISION_FAST:-}" != "1" ]]; then
 # as "Recommended only for sandboxes with no internet access," but a
 # throwaway VM has the same blast-radius properties.
 source "$HOME/.zprofile" 2>/dev/null || true
-exec "$HOME/.local/bin/claude" --dangerously-skip-permissions --chrome "gm"
+# NOTE: --chrome intentionally omitted. The Chrome MCP routes via the
+# Anthropic OAuth identity, not localhost — leaving it on lets a VM
+# agent open tabs in any other Chrome signed into the same account
+# (e.g. the operator's laptop). Per-agent provisioners overwrite this
+# wrapper; frontendqa is the one that re-adds --chrome on purpose.
+exec "$HOME/.local/bin/claude" --dangerously-skip-permissions "gm"
 EOSH
   chmod 755 "$HOME/.local/bin/claude-startup.sh"
 
@@ -226,7 +232,7 @@ EOPROF
 
   # LaunchAgent: just open iTerm at login. No script argument => no
   # LaunchServices "OK to run this script?" prompt. iTerm opens a window
-  # with the default profile, which runs claude --chrome "gm".
+  # with the default profile, which runs claude "gm".
   cat > "$HOME/Library/LaunchAgents/com.cont.claude-startup.plist" <<EOPLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">

@@ -41,9 +41,12 @@ breadth. Don't pad — fewer words with sharper analysis beats length.
   the leftclaw RPC (Base + Alchemy) are available. For TVL, holder
   counts, governance votes, etc., quote the on-chain value with the
   block number you read it at.
-- **Use the Chrome integration** for browsing dynamic sites (forums,
-  dashboards, Etherscan); take screenshots for evidence when content
-  may change.
+- **Use `WebFetch` and `WebSearch`** for browsing — the Chrome
+  integration is intentionally disabled in research VMs (it routes
+  account-scoped and can hijack the operator's host Chrome). For
+  dashboards and forums that require JS rendering, fall back to a
+  static archive (web.archive.org) or note the limitation in Risks
+  and Caveats.
 - **Distinguish primary vs secondary.** A protocol's docs/whitepaper +
   its deployed contract are primary. A blog post or thread describing
   them is secondary. Prefer primary; cite secondary only when primary

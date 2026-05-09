@@ -104,7 +104,7 @@ if [[ ! -f "$PROMPT_FILE" ]]; then
 fi
 PROMPT="$(cat "$PROMPT_FILE")"
 
-exec "$HOME/.local/bin/claude" --dangerously-skip-permissions --chrome "$PROMPT"
+exec "$HOME/.local/bin/claude" --dangerously-skip-permissions "$PROMPT"
 EOSH
 chmod 755 "$HOME/.local/bin/claude-startup.sh"
 
