@@ -11,6 +11,10 @@ set -euo pipefail
 
 if [[ "${CONT_PROVISION_FAST:-}" == "1" ]]; then
   echo "==> provision.sh: FAST mode — skip (Tier 1 baked into gold)"
+  # Still expose brew's PATH so downstream layers (e.g. gh, yarn, cast)
+  # are reachable in this non-interactive shell. Without this, FAST sync
+  # provisioners that call brew-installed tools fail with "command not found".
+  eval "$(/opt/homebrew/bin/brew shellenv 2>/dev/null)" || true
   return 0 2>/dev/null || exit 0
 fi
 
