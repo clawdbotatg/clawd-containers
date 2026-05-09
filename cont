@@ -515,9 +515,16 @@ cmd_provision() {
           "rm -rf '$dst_dir' && mkdir -p '$(dirname "$dst_dir")' && cd '$(dirname "$dst_dir")' && tar xf -"
   }
 
-  # ── Copy individual files ─────────────────────────────────────────────
+  # ── Bundle EVERYTHING into one tar stream over one SSH connection ────
+  # Old approach: 15+ individual scp calls + scp -r for dirs = 20+ SSH
+  # handshakes. macOS sshd rate-limits after ~10-15 rapid connections.
+  # Fix: collect all files into a staging dir, tar|ssh the lot in ONE go.
   local script_dir; script_dir="$(cd "$(dirname "$script")" && pwd)"
   local script_name; script_name="$(basename "$script")"
+  local stage; stage="$(mktemp -d)"
+  trap "rm -rf '$stage'" RETURN
+
+  # Individual files → flat in staging dir
   local seen_files=" "
   local f fname
   for f in "$script" "$script_dir"/provision*.sh "$script_dir"/.env* "$script_dir"/*.prompt.md; do
@@ -526,19 +533,17 @@ cmd_provision() {
     fname="$(basename "$f")"
     case "$seen_files" in *" $fname "*) continue ;; esac
     seen_files+="$fname "
-    echo "==> copying $fname -> $name:/tmp/$fname ..."
-    _vscp "$f" "/tmp/$fname"
+    cp "$f" "$stage/$fname"
   done
 
-  # ── Copy directories via tar|ssh (single connection each) ─────────
+  # Directories → preserve structure in staging dir
   local d
   for d in scripts skills; do
     [[ -d "$script_dir/$d" ]] || continue
-    echo "==> copying $d/ -> $name:/tmp/$d/ ..."
-    _vtar "$script_dir/$d" "/tmp/$d"
+    cp -a "$script_dir/$d" "$stage/$d"
   done
 
-  # Refresh the host's Claude Code keychain entry
+  # Claude credentials → renamed in staging dir
   if [[ -f "$CLAUDE_TOKEN_FILE" || -f "$CLAUDE_CREDS_FILE" ]]; then
     save_claude_credentials_blob >/dev/null 2>&1 || true
     save_claude_account_blob >/dev/null 2>&1 || true
@@ -547,21 +552,15 @@ cmd_provision() {
       save_claude_token "$fresh"
     fi
   fi
+  [[ -f "$CLAUDE_TOKEN_FILE" ]]   && cp "$CLAUDE_TOKEN_FILE"   "$stage/cont-claude-token"
+  [[ -f "$CLAUDE_CREDS_FILE" ]]   && cp "$CLAUDE_CREDS_FILE"   "$stage/cont-claude-credentials.json"
+  [[ -f "$CLAUDE_ACCOUNT_FILE" ]] && cp "$CLAUDE_ACCOUNT_FILE" "$stage/cont-claude-account.json"
 
-  if [[ -f "$CLAUDE_TOKEN_FILE" ]]; then
-    echo "==> copying claude oauth token -> $name:/tmp/cont-claude-token ..."
-    _vscp "$CLAUDE_TOKEN_FILE" "/tmp/cont-claude-token"
-  fi
-
-  if [[ -f "$CLAUDE_CREDS_FILE" ]]; then
-    echo "==> copying claude keychain blob -> $name:/tmp/cont-claude-credentials.json ..."
-    _vscp "$CLAUDE_CREDS_FILE" "/tmp/cont-claude-credentials.json"
-  fi
-
-  if [[ -f "$CLAUDE_ACCOUNT_FILE" ]]; then
-    echo "==> copying claude account blob -> $name:/tmp/cont-claude-account.json ..."
-    _vscp "$CLAUDE_ACCOUNT_FILE" "/tmp/cont-claude-account.json"
-  fi
+  # Ship it — ONE ssh connection, ONE tar stream
+  echo "==> syncing $(find "$stage" -type f | wc -l | tr -d ' ') files + $(find "$stage" -type d -mindepth 1 | wc -l | tr -d ' ') dirs to $name:/tmp/ ..."
+  tar cf - -C "$stage" . \
+    | sshpass -p "$SSH_PASS" ssh "${ssh_opts[@]}" "$SSH_USER@$ip" \
+        "cd /tmp && tar xf -"
 
   local fast_env=""
   if [[ "${CONT_PROVISION_FAST:-}" == "1" ]]; then
