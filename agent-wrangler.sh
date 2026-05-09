@@ -285,12 +285,16 @@ except Exception:
     if ! tart clone "$gold" "$vm" >>"$LOG" 2>&1; then
       log "  tart clone $gold failed — falling back to full provision"
       if ! ./cont provision "$vm" "./$prov" >>"$LOG" 2>&1; then
-        log "  cont provision failed — see $LOG"
+        log "  cont provision failed — cleaning up zombie VM"
+        ./cont down "$vm" >>"$LOG" 2>&1 || true
+        ./cont rm "$vm"   >>"$LOG" 2>&1 || true
         notify "🔴 ${vm} failed to start ${desc}"
         return 1
       fi
     elif ! ./cont sync "$vm" "./$prov" >>"$LOG" 2>&1; then
-      log "  cont sync failed — see $LOG"
+      log "  cont sync failed — cleaning up zombie VM"
+      ./cont down "$vm" >>"$LOG" 2>&1 || true
+      ./cont rm "$vm"   >>"$LOG" 2>&1 || true
       notify "🔴 ${vm} failed to start ${desc}"
       return 1
     fi
@@ -299,7 +303,9 @@ except Exception:
     # Run ./bake-agent-gold.sh $vm to build one and speed up future boots.
     log "  no ${gold} — full provision (run ./bake-agent-gold.sh $vm to enable fast path)"
     if ! ./cont provision "$vm" "./$prov" >>"$LOG" 2>&1; then
-      log "  cont provision failed — see $LOG"
+      log "  cont provision failed — cleaning up zombie VM"
+      ./cont down "$vm" >>"$LOG" 2>&1 || true
+      ./cont rm "$vm"   >>"$LOG" 2>&1 || true
       notify "🔴 ${vm} failed to start ${desc}"
       return 1
     fi

@@ -490,40 +490,32 @@ cmd_provision() {
     exit 1
   fi
 
-  # ── SSH multiplexing ──────────────────────────────────────────────────
-  # The old approach opened a fresh TCP+SSH handshake for every single scp
-  # call (~20 individual files + recursive dirs). macOS sshd rate-limits
-  # after that many rapid connections and starts rejecting with
-  # "Permission denied" — the #1 cause of cont sync failures.
-  #
-  # Fix: open ONE master connection via ControlMaster and reuse it for
-  # every subsequent ssh/scp. Faster *and* reliable.
-  local ctl_dir; ctl_dir="$(mktemp -d)"
-  local ctl_path="$ctl_dir/ssh-%r@%h:%p"
-  local -a mux_opts=(
+  # ── SSH helpers (plain sshpass, no multiplexing) ────────────────────
+  # sshpass + ControlMaster doesn't work (sshpass can't handle -fN).
+  # Instead we use tar|ssh for directories (single connection per dir)
+  # to avoid the scp -r connection-exhaustion that caused 148 failures.
+  local -a ssh_opts=(
     -o StrictHostKeyChecking=no
     -o UserKnownHostsFile=/dev/null
     -o LogLevel=ERROR
     -o PreferredAuthentications=password
     -o PubkeyAuthentication=no
-    -o "ControlMaster=auto"
-    -o "ControlPath=$ctl_path"
-    -o "ControlPersist=120"
   )
+  _vssh() { sshpass -p "$SSH_PASS" ssh "${ssh_opts[@]}" "$SSH_USER@$ip" "$@"; }
+  _vscp() {
+    local src="$1" dst="$2"
+    sshpass -p "$SSH_PASS" scp "${ssh_opts[@]}" "$src" "$SSH_USER@$ip:$dst"
+  }
+  # tar|ssh: pack locally, stream over one SSH connection, unpack remotely.
+  # Replaces scp -r which opened per-file connections and got rate-limited.
+  _vtar() {
+    local src_dir="$1" dst_dir="$2"
+    tar cf - -C "$(dirname "$src_dir")" "$(basename "$src_dir")" \
+      | sshpass -p "$SSH_PASS" ssh "${ssh_opts[@]}" "$SSH_USER@$ip" \
+          "rm -rf '$dst_dir' && mkdir -p '$(dirname "$dst_dir")' && cd '$(dirname "$dst_dir")' && tar xf -"
+  }
 
-  # Establish the master connection
-  echo "==> opening SSH master connection to $name ($ip) ..."
-  sshpass -p "$SSH_PASS" ssh "${mux_opts[@]}" -fN "$SSH_USER@$ip" 2>/dev/null
-  # shellcheck disable=SC2064
-  trap "ssh -o ControlPath='$ctl_path' -O exit '$SSH_USER@$ip' 2>/dev/null; rm -rf '$ctl_dir'" RETURN
-
-  # Helper: ssh/scp through the multiplexed connection (no sshpass needed
-  # after the master is up — the socket handles auth).
-  _mssh()  { ssh  "${mux_opts[@]}" "$SSH_USER@$ip" "$@"; }
-  _mscp()  { scp  "${mux_opts[@]}" "$@" "$SSH_USER@$ip:/tmp/"; }
-  _mscpr() { scp  -r "${mux_opts[@]}" "$@"; }
-
-  # ── Copy files ────────────────────────────────────────────────────────
+  # ── Copy individual files ─────────────────────────────────────────────
   local script_dir; script_dir="$(cd "$(dirname "$script")" && pwd)"
   local script_name; script_name="$(basename "$script")"
   local seen_files=" "
@@ -535,23 +527,18 @@ cmd_provision() {
     case "$seen_files" in *" $fname "*) continue ;; esac
     seen_files+="$fname "
     echo "==> copying $fname -> $name:/tmp/$fname ..."
-    _mscp "$f"
+    _vscp "$f" "/tmp/$fname"
   done
 
-  # Copy scripts/ and skills/ directories
+  # ── Copy directories via tar|ssh (single connection each) ─────────
   local d
   for d in scripts skills; do
     [[ -d "$script_dir/$d" ]] || continue
     echo "==> copying $d/ -> $name:/tmp/$d/ ..."
-    _mssh "rm -rf /tmp/$d"
-    _mscpr "$script_dir/$d" "$SSH_USER@$ip:/tmp/$d"
+    _vtar "$script_dir/$d" "/tmp/$d"
   done
 
-  # Refresh the host's Claude Code keychain entry (rotates the access token
-  # via refreshToken) and re-save both artifacts so we always ship a
-  # non-expired blob to the VM. Best-effort: if `claude` isn't installed on
-  # the host or the keychain entry is missing, we ship whatever was last
-  # saved by `cont auth` (or skip injection entirely).
+  # Refresh the host's Claude Code keychain entry
   if [[ -f "$CLAUDE_TOKEN_FILE" || -f "$CLAUDE_CREDS_FILE" ]]; then
     save_claude_credentials_blob >/dev/null 2>&1 || true
     save_claude_account_blob >/dev/null 2>&1 || true
@@ -561,37 +548,28 @@ cmd_provision() {
     fi
   fi
 
-  # If a host-side Claude OAuth token exists, scp it in so token-aware
-  # provision scripts can pick it up and write it to the VM's shell rc.
   if [[ -f "$CLAUDE_TOKEN_FILE" ]]; then
     echo "==> copying claude oauth token -> $name:/tmp/cont-claude-token ..."
-    _mscp "$CLAUDE_TOKEN_FILE"
-    _mssh "mv /tmp/$(basename "$CLAUDE_TOKEN_FILE") /tmp/cont-claude-token"
+    _vscp "$CLAUDE_TOKEN_FILE" "/tmp/cont-claude-token"
   fi
 
-  # Ship the full keychain credential blob so the agent layer can re-create
-  # the "Claude Code-credentials" entry inside the VM's login keychain.
   if [[ -f "$CLAUDE_CREDS_FILE" ]]; then
     echo "==> copying claude keychain blob -> $name:/tmp/cont-claude-credentials.json ..."
-    _mscp "$CLAUDE_CREDS_FILE"
-    _mssh "mv /tmp/$(basename "$CLAUDE_CREDS_FILE") /tmp/cont-claude-credentials.json"
+    _vscp "$CLAUDE_CREDS_FILE" "/tmp/cont-claude-credentials.json"
   fi
 
-  # Ship the auth-state fields extracted from the host's ~/.claude.json.
   if [[ -f "$CLAUDE_ACCOUNT_FILE" ]]; then
     echo "==> copying claude account blob -> $name:/tmp/cont-claude-account.json ..."
-    _mscp "$CLAUDE_ACCOUNT_FILE"
-    _mssh "mv /tmp/$(basename "$CLAUDE_ACCOUNT_FILE") /tmp/cont-claude-account.json"
+    _vscp "$CLAUDE_ACCOUNT_FILE" "/tmp/cont-claude-account.json"
   fi
 
-  # Forward CONT_PROVISION_FAST through to the remote bash.
   local fast_env=""
   if [[ "${CONT_PROVISION_FAST:-}" == "1" ]]; then
     fast_env="CONT_PROVISION_FAST=1 "
   fi
 
   echo "==> running ${fast_env}$script_name in $name ..."
-  _mssh "${fast_env}bash /tmp/$script_name && sync && sync"
+  _vssh "${fast_env}bash /tmp/$script_name && sync && sync"
 }
 
 # Sync — re-run the per-agent provisioner in FAST mode. Used after cloning
