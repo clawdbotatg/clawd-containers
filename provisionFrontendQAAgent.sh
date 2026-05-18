@@ -78,9 +78,13 @@ if [[ -f "$ENV_SRC" ]]; then
   echo "==> installing $ENV_DST (mode 600)"
   install -m 600 "$ENV_SRC" "$ENV_DST"
   rm -f "$ENV_SRC"
-  if ! grep -qs '\.env\.frontend-qa' "$HOME/.zprofile" 2>/dev/null; then
-    echo '[ -f "$HOME/.env.frontend-qa" ] && source "$HOME/.env.frontend-qa"' >> "$HOME/.zprofile"
+  # Idempotent rewrite: strip any prior .env.frontend-qa line, then re-add
+  # with set -a so secrets auto-export to child processes.
+  if [[ -f "$HOME/.zprofile" ]]; then
+    grep -v '\.env\.frontend-qa' "$HOME/.zprofile" > "$HOME/.zprofile.tmp" || true
+    mv "$HOME/.zprofile.tmp" "$HOME/.zprofile"
   fi
+  echo '[ -f "$HOME/.env.frontend-qa" ] && { set -a; source "$HOME/.env.frontend-qa"; set +a; }' >> "$HOME/.zprofile"
 else
   echo "ERROR: $ENV_SRC missing — drop a .env.frontend-qa next to this script on the host" >&2
   echo "       (copy .env.frontend-qa.example -> .env.frontend-qa and fill in values)" >&2

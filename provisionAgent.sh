@@ -261,18 +261,43 @@ EOPLIST
 fi
 
 # --- Final auth sanity check --------------------------------------------
-# Single source-of-truth verification: run a tiny non-interactive claude
-# call in a fresh login shell. If this 401s, provisioning failed.
+# Run a tiny non-interactive claude call in a fresh login shell. The
+# access token we just injected may have been server-revoked between
+# when cont read the host keychain and now (the host's own Claude Code
+# rotates the access token periodically; if a rotation lands between
+# our read and our use, the OLD token is invalidated). Claude Code
+# inside the VM has the long-lived refreshToken in its keychain and
+# can refresh — but the refresh isn't always instant on the first
+# call, so we retry. Soft-fail (warn but proceed) after all retries
+# so a transient auth race doesn't tank an otherwise-good VM; the
+# agent's actual work will surface a real auth problem if there is one.
 echo "==> verifying claude auth (sanity ping)"
-if ! out="$(zsh -lc 'claude -p --output-format text "reply with the single word OK"' 2>&1)"; then
-  echo "ERROR: claude auth verification failed:" >&2
-  echo "$out" >&2
+auth_ok=0
+for attempt in 1 2 3; do
+  if out="$(zsh -lc 'claude -p --output-format text "reply with the single word OK"' 2>&1)"; then
+    case "$out" in
+      *OK*) echo "==> claude auth ok (attempt ${attempt})"; auth_ok=1; break ;;
+    esac
+  fi
+  if (( attempt < 3 )); then
+    echo "  attempt ${attempt} failed, sleeping 5s before retry..."
+    sleep 5
+  fi
+done
+if (( auth_ok == 0 )); then
+  # FAIL FAST. Previous behavior was to warn and proceed, but the agent
+  # inside the VM cannot recover from a dead OAuth token — the refresh
+  # path that "should" kick in doesn't actually work here. Continuing
+  # produces a 5-min silent stall every boot (the wrangler's no-accept
+  # grace window) which is much worse than a fast provision failure.
+  # Exit non-zero so cont marks the provision as failed and the wrangler
+  # backs off after MAX_START_RETRIES instead of silently looping.
+  echo "ERROR: claude auth sanity ping failed after 3 attempts." >&2
+  echo "ERROR: last response: $out" >&2
+  echo "ERROR: this VM cannot authenticate to Anthropic. Aborting provision." >&2
+  echo "ERROR: fix on the host with 'claude /login', then retry." >&2
   exit 1
 fi
-case "$out" in
-  *OK*) echo "==> claude auth ok" ;;
-  *)    echo "ERROR: unexpected claude reply: $out" >&2; exit 1 ;;
-esac
 
 # Flush all writes to disk. tart stop is not always graceful and can roll
 # back recent unsynced writes (we hit this when freshly-written files

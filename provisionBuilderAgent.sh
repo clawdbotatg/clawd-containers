@@ -99,9 +99,13 @@ if [[ -f "$ENV_SRC" ]]; then
   echo "==> installing $ENV_DST (mode 600)"
   install -m 600 "$ENV_SRC" "$ENV_DST"
   rm -f "$ENV_SRC"
-  if ! grep -qs '\.env\.builder' "$HOME/.zprofile" 2>/dev/null; then
-    echo '[ -f "$HOME/.env.builder" ] && source "$HOME/.env.builder"' >> "$HOME/.zprofile"
+  # Idempotent rewrite: strip any prior .env.builder line, then re-add
+  # with set -a so secrets auto-export to child processes.
+  if [[ -f "$HOME/.zprofile" ]]; then
+    grep -v '\.env\.builder' "$HOME/.zprofile" > "$HOME/.zprofile.tmp" || true
+    mv "$HOME/.zprofile.tmp" "$HOME/.zprofile"
   fi
+  echo '[ -f "$HOME/.env.builder" ] && { set -a; source "$HOME/.env.builder"; set +a; }' >> "$HOME/.zprofile"
 else
   echo "ERROR: $ENV_SRC missing — drop a .env.builder next to this script on the host" >&2
   echo "       (copy .env.builder.example -> .env.builder and fill in values)" >&2

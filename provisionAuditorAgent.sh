@@ -88,9 +88,13 @@ if [[ -f "$ENV_SRC" ]]; then
   echo "==> installing $ENV_DST (mode 600)"
   install -m 600 "$ENV_SRC" "$ENV_DST"
   rm -f "$ENV_SRC"
-  if ! grep -qs '\.env\.auditor' "$HOME/.zprofile" 2>/dev/null; then
-    echo '[ -f "$HOME/.env.auditor" ] && source "$HOME/.env.auditor"' >> "$HOME/.zprofile"
+  # Idempotent rewrite: strip any prior .env.auditor line, then re-add
+  # with set -a so secrets auto-export to child processes.
+  if [[ -f "$HOME/.zprofile" ]]; then
+    grep -v '\.env\.auditor' "$HOME/.zprofile" > "$HOME/.zprofile.tmp" || true
+    mv "$HOME/.zprofile.tmp" "$HOME/.zprofile"
   fi
+  echo '[ -f "$HOME/.env.auditor" ] && { set -a; source "$HOME/.env.auditor"; set +a; }' >> "$HOME/.zprofile"
 else
   echo "ERROR: $ENV_SRC missing — drop a .env.auditor next to this script on the host" >&2
   echo "       (copy .env.auditor.example -> .env.auditor and fill in values)" >&2

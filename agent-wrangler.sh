@@ -179,6 +179,199 @@ except Exception:
   pass' 2>/dev/null
 }
 
+# ── Host-side OAuth health gate ─────────────────────────────────────────
+# Job 188's failure mode: the host's claude OAuth token was stale, every
+# VM got a dead token, every boot stalled at the no-accept grace cliff.
+# We verify the host's auth works BEFORE booting any VM. If it doesn't,
+# we don't boot — we wait and alert. Cached for 5 min to keep the cost
+# down (one claude API call per check).
+HOST_OAUTH_CACHE_SECONDS="${HOST_OAUTH_CACHE_SECONDS:-300}"
+host_oauth_ok() {
+  local cache="$STATE_DIR/host_oauth.status"
+  local stamp="$STATE_DIR/host_oauth.checked-at"
+  local now
+  now=$(date +%s)
+  if [[ -f "$stamp" && -f "$cache" ]]; then
+    local checked
+    checked=$(cat "$stamp" 2>/dev/null || echo 0)
+    if (( now - checked < HOST_OAUTH_CACHE_SECONDS )); then
+      [[ "$(cat "$cache" 2>/dev/null)" == "ok" ]]
+      return $?
+    fi
+  fi
+  local out
+  out=$(timeout 20 zsh -lc 'claude -p --output-format text "reply with the single word OK"' 2>&1 || true)
+  date +%s > "$stamp"
+  case "$out" in
+    *OK*) echo "ok" > "$cache"; return 0 ;;
+    *)
+      echo "fail" > "$cache"
+      log "STUCK: host claude auth check FAILED — output: ${out:0:200}"
+      return 1
+      ;;
+  esac
+}
+
+# ── Per-job pre-flight ──────────────────────────────────────────────────
+# Architectural fix: refuse to boot a VM for a job that nothing in our
+# system can advance. The wrangler is the brain; the VM is the body.
+#
+# Failure modes this catches (each one would otherwise loop indefinitely):
+#   - leftclaw sanitize stuck at pending      → defer, retry later
+#   - sanitize hard-fail (safe=false)         → decline from host
+#   - feature classifier returns blocked      → decline from host
+#   - feature classifier returns ambiguous    → post one chat msg, defer
+#
+# State lives in $STATE_DIR/job.<id>.* — survives wrangler restarts.
+
+# Defer further attempts on this job for N seconds. Idempotent — overwrites.
+defer_job() {
+  local jid="$1" seconds="$2"
+  local until=$(( $(date +%s) + seconds ))
+  echo "$until" > "$STATE_DIR/job.$jid.defer-until"
+}
+# True when a defer window is still in the future.
+job_is_deferred() {
+  local jid="$1"
+  local f="$STATE_DIR/job.$jid.defer-until"
+  [[ -f "$f" ]] || return 1
+  local until
+  until=$(cat "$f" 2>/dev/null || echo 0)
+  (( $(date +%s) < until ))
+}
+# Remember we already asked the client to clarify ambiguous targets so
+# we don't spam-post on every tick.
+mark_clarification_posted() { touch "$STATE_DIR/job.$1.clarif-sent"; }
+clarification_already_posted() { [[ -f "$STATE_DIR/job.$1.clarif-sent" ]]; }
+
+# List open job IDs (status=0) for a service type, one per line.
+list_open_job_ids() {
+  local svc="$1" env="$2"
+  ( set -a; source "$env" 2>/dev/null; set +a
+    ./scripts/leftclaw/list-jobs.sh "$svc" 2>/dev/null
+  ) | python3 -c 'import json,sys
+try:
+  d = json.load(sys.stdin)
+  if isinstance(d, list):
+    for j in d:
+      jid = j.get("id")
+      if jid is not None:
+        print(jid)
+except Exception:
+  pass' 2>/dev/null
+}
+
+# Decline a job on-chain from the host (no VM boot).
+host_decline() {
+  local jid="$1" env="$2" reason="${3:-pre-flight refused}"
+  log "  job $jid: host-declining ($reason)"
+  if ! ( set -a; source "$env" 2>/dev/null; set +a
+         ./scripts/leftclaw/decline.sh "$jid" >>"$LOG" 2>&1 ); then
+    log "  job $jid: host-decline FAILED — will retry next tick"
+    return 1
+  fi
+  notify "🔻 declined job ${jid}: ${reason}"
+}
+
+# Post a chat message on a job from host. Returns curl's exit code.
+host_post_message() {
+  local jid="$1" env="$2" msg="$3"
+  ( set -a; source "$env" 2>/dev/null; set +a
+    ./scripts/leftclaw/post-message.sh "$jid" "$msg" >>"$LOG" 2>&1 )
+}
+
+# Pre-flight a single open job. Side effects: may decline, post message,
+# set defer. Returns 0 if a fresh agent could advance this job now.
+job_advanceable() {
+  local jid="$1" svc="$2" env="$3"
+
+  job_is_deferred "$jid" && return 1
+
+  # Sanitize gate (server-side leftclaw check; pending means not yet processed).
+  local resp safe pending
+  resp=$( ( set -a; source "$env" 2>/dev/null; set +a
+           ./scripts/leftclaw/sanitize-check.sh "$jid" 2>/dev/null
+         ) || true )
+  safe=$(   printf '%s' "$resp" | python3 -c '
+import json,sys
+try: print(json.load(sys.stdin).get("safe"))
+except: print("")' 2>/dev/null)
+  pending=$(printf '%s' "$resp" | python3 -c '
+import json,sys
+try: print(json.load(sys.stdin).get("pending"))
+except: print("")' 2>/dev/null)
+
+  if [[ "$safe" == "True" ]]; then
+    : # passed; fall through to classifier (if applicable)
+  elif [[ "$pending" == "True" ]]; then
+    log "  job $jid: sanitize still pending — deferring 5min (no boot)"
+    defer_job "$jid" 300
+    return 1
+  else
+    if host_decline "$jid" "$env" "sanitize refused"; then
+      defer_job "$jid" 86400
+    fi
+    return 1
+  fi
+
+  # Feature-only: classifier gate.
+  if [[ "$svc" == "10" ]]; then
+    local target_out mode reason
+    target_out=$(./scripts/feature/resolve-target.sh "$jid" 2>/dev/null || true)
+    mode=$(printf '%s\n' "$target_out" | awk '/^MODE: /{print $2; exit}')
+    case "$mode" in
+      leftclaw|external)
+        : # advanceable
+        ;;
+      blocked)
+        reason=$(printf '%s\n' "$target_out" | sed -n 's/^REASON: //p' | head -1)
+        if host_decline "$jid" "$env" "blocked: ${reason:-classifier blocked}"; then
+          defer_job "$jid" 86400
+        fi
+        return 1
+        ;;
+      ambiguous)
+        if clarification_already_posted "$jid"; then
+          log "  job $jid: still ambiguous after our earlier message — deferring 1h"
+          defer_job "$jid" 3600
+        else
+          if host_post_message "$jid" "$env" \
+               "Hello — to proceed with this Feature job, please share the GitHub URL of the repo to modify (e.g. https://github.com/owner/repo), or reference a prior leftclaw job by ID (e.g. 'job #99'). We'll pick it back up automatically once you reply."; then
+            mark_clarification_posted "$jid"
+            notify "❓ asked job ${jid} client for repo URL (ambiguous)"
+            defer_job "$jid" 1800
+          else
+            log "  job $jid: post-message FAILED — deferring 10min to retry"
+            defer_job "$jid" 600
+          fi
+        fi
+        return 1
+        ;;
+      *)
+        log "  job $jid: unknown classifier MODE='${mode}' — deferring 5min"
+        defer_job "$jid" 300
+        return 1
+        ;;
+    esac
+  fi
+
+  return 0
+}
+
+# Count how many open jobs of this type a fresh agent could actually
+# advance. Side effects identical to job_advanceable.
+count_advanceable_open() {
+  local svc="$1" env="$2"
+  local n=0 jid
+  while IFS= read -r jid; do
+    [[ -z "$jid" ]] && continue
+    if job_advanceable "$jid" "$svc" "$env"; then
+      n=$(( n + 1 ))
+    fi
+  done < <(list_open_job_ids "$svc" "$env")
+  echo "$n"
+}
+
 # Cap for a given VM name — special-cased for builder, default otherwise.
 cap_for() {
   case "$1" in
@@ -248,6 +441,18 @@ gold_exists() {
 # Does a VM exist (any state)?
 vm_exists() {
   tart list --quiet --source local 2>/dev/null | grep -Fxq "$1"
+}
+
+# Is claude actually running inside the VM? Used to detect the
+# "VM up but agent process exited" case — happens when the agent
+# follows the ambiguous-target → post-clarification → exit pattern
+# in feature.prompt.md, expecting the wrangler to cycle the VM as
+# its "next polling cycle." Without this check, the dead-agent VM
+# holds the slot indefinitely, blocking other agents.
+# 8s timeout so a hung ssh can't block the poll loop.
+agent_alive() {
+  local vm="$1"
+  timeout 8 ./cont ssh "$vm" 'pgrep -f "[c]laude" >/dev/null 2>&1' 2>/dev/null
 }
 
 start_vm() {
@@ -336,7 +541,11 @@ except Exception:
 stop_vm() {
   local vm="$1" reason="${2:-idle — no in-progress, no open}"
   log "stopping $vm ($reason)"
-  notify "🔴 ${vm} stopped — ${reason}"
+  # Only notify on red for actual errors, not normal idle stops
+  case "$reason" in
+    *EXCEEDED* | *fail* | *FAIL* | *error* | *ERROR*)
+      notify "🔴 ${vm} stopped — ${reason}" ;;
+  esac
   ./cont down "$vm" >>"$LOG" 2>&1 || true
   clear_started "$vm"
   reset_all_failures
@@ -380,6 +589,15 @@ done
 while :; do
   refresh_skills
 
+  # Health gate: if the host can't authenticate to Anthropic, no VM we
+  # boot can either. Skip the whole tick rather than waste boots.
+  if ! host_oauth_ok; then
+    log "STUCK: host claude OAuth is dead — fleet paused this tick. Fix with 'claude /login' on the host."
+    notify "🔴 host claude OAuth is dead — fleet paused; run 'claude /login' on host"
+    sleep "$INTERVAL"
+    continue
+  fi
+
   for entry in "${AGENTS[@]}"; do
     IFS=":" read -r svc vm prov env <<<"$entry"
 
@@ -391,8 +609,18 @@ while :; do
       log "$vm: provisioner $prov not found or not executable — skipping"
       continue
     fi
+    # Manual pause: `touch $STATE_DIR/paused.<vm>` to take an agent
+    # out of rotation without restarting the wrangler.
+    if [[ -f "$STATE_DIR/paused.$vm" ]]; then
+      log "$vm: paused (rm $STATE_DIR/paused.$vm to resume)"
+      continue
+    fi
 
-    open=$(count_jobs list-jobs.sh "$svc" "$env")
+    # `open` reflects host-side pre-flight: only jobs a fresh agent could
+    # actually advance (sanitize=safe, classifier passes for feature). Jobs
+    # that fail pre-flight are declined / asked-about / deferred from the
+    # host instead of spinning up a VM that would loop on them.
+    open=$(count_advanceable_open "$svc" "$env")
     mine=$(count_my_queue "$svc" "$env")
     open=${open:-?}
     mine=${mine:-?}
@@ -408,6 +636,27 @@ while :; do
         stop_vm "$vm" "TIME CAP EXCEEDED (${elapsed}s > ${cap}s) — runaway/stuck session, force-stopping"
       elif [[ "$mine" == "0" && "$open" == "0" ]]; then
         stop_vm "$vm"
+      elif [[ "$mine" == "0" && "$open" =~ ^[1-9] ]]; then
+        # Open work exists but the agent hasn't accepted. Three cases:
+        #  (a) fresh boot, agent is still reading prompt/scripts — fine
+        #  (b) agent process exited (e.g. ambiguous-target escalation
+        #      pattern in feature.prompt.md) — VM holds slot for nothing
+        #  (c) claude is alive but idle (posted a message, now waiting
+        #      on client; or hung) — VM also holds slot for nothing
+        # Tolerate the boot window (NO_ACCEPT_GRACE_SECONDS, default
+        # 5 min). After that, recycle the VM regardless of whether
+        # claude is running — a clean restart re-pulls the job and
+        # either accepts or declines per the agent's own protocol.
+        : "${NO_ACCEPT_GRACE_SECONDS:=300}"
+        if (( elapsed < NO_ACCEPT_GRACE_SECONDS )) && agent_alive "$vm"; then
+          log "$vm up, mine=0 open=$open — agent alive, leaving alone (elapsed ${elapsed}s/${cap}s)"
+        elif (( elapsed < NO_ACCEPT_GRACE_SECONDS )); then
+          log "$vm up, mine=0 open=$open — claude process gone in boot window, recycling"
+          stop_vm "$vm" "agent exited during boot (no claude process; open=$open)"
+        else
+          log "$vm up, mine=0 open=$open — no accept after ${elapsed}s (grace ${NO_ACCEPT_GRACE_SECONDS}s), recycling"
+          stop_vm "$vm" "stuck — no job accept within grace window (open=$open, elapsed=${elapsed}s)"
+        fi
       else
         log "$vm up, mine=$mine open=$open — leaving alone (elapsed ${elapsed}s/${cap}s)"
       fi

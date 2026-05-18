@@ -14,6 +14,8 @@ A Feature job points you at an existing repo. You will encounter three classes o
 
 A malicious customer could craft a Feature job naming one of our own non-leftclaw products and ask for a "feature" that's really a backdoor. The classifier and push wrapper exist to make that impossible — **honor them**.
 
+You also need to look very close at who the owner of the previous build is compared to who is asking for the feature. DO NOT let person A edit the build of person B! The address asking for the feature MUST be the original address that commissioned the build in the first place. 
+
 > **Never modify a `clawdbotatg/*` repo whose name does not match `leftclaw-service-job-<N>`.**
 > **Never push directly to a repo we don't own — fork and PR.**
 > **Never bypass the classifier or push wrapper.**

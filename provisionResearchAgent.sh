@@ -71,9 +71,15 @@ if [[ -f "$ENV_SRC" ]]; then
   echo "==> installing $ENV_DST (mode 600)"
   install -m 600 "$ENV_SRC" "$ENV_DST"
   rm -f "$ENV_SRC"
-  if ! grep -qs '\.env\.research' "$HOME/.zprofile" 2>/dev/null; then
-    echo '[ -f "$HOME/.env.research" ] && source "$HOME/.env.research"' >> "$HOME/.zprofile"
+  # Idempotent rewrite: strip any prior .env.research line, then re-add
+  # with set -a so secrets auto-export to child processes (claude's
+  # Bash tool calls were getting "PRIVATE_KEY not set" because plain
+  # source doesn't export KEY=value assignments).
+  if [[ -f "$HOME/.zprofile" ]]; then
+    grep -v '\.env\.research' "$HOME/.zprofile" > "$HOME/.zprofile.tmp" || true
+    mv "$HOME/.zprofile.tmp" "$HOME/.zprofile"
   fi
+  echo '[ -f "$HOME/.env.research" ] && { set -a; source "$HOME/.env.research"; set +a; }' >> "$HOME/.zprofile"
 else
   echo "ERROR: $ENV_SRC missing — drop a .env.research next to this script on the host" >&2
   echo "       (copy .env.research.example -> .env.research and fill in values)" >&2
