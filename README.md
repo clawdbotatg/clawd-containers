@@ -41,8 +41,8 @@ claude                        # one-time interactive login (writes OAuth to keyc
 
 ./refresh-skills.sh           # clones skills/evm-audit-skills + skills/pashov-skills (gitignored — not in this repo)
 
-scp old-mac:~/clawd/clawd-containers/.env.* .    # bring the five secrets files
-chmod 600 .env.*
+scp old-mac:~/clawd/clawd-harness/projects/clawd-containers/.env* .   # bring the secrets (.env + per-agent + .env.notify)
+chmod 600 .env*
 
 cont pull                     # ~30GB, one-time — the macOS-Tahoe base image
 
@@ -63,6 +63,33 @@ matching job appears. With per-agent gold baked, each boot is ~10s. Without
 it, the first boot per agent type runs the full provision (~3–5 min);
 subsequent boots are still seconds either way (the slow path's idempotency
 checks skip most work, but the fast path is meaningfully faster).
+
+### Production: run it under launchd (survives reboot)
+
+The `nohup` form above is fine for a quick run, but on this host the wrangler
+is daemonized via **launchd** so it starts at login and respawns if it dies.
+Two agents live in `~/Library/LaunchAgents/`:
+
+- **`com.leftclaw.wrangler`** — runs `./agent-wrangler.sh 60` from this repo
+  (`RunAtLoad` + `KeepAlive`). Logs to `/tmp/agent-wrangler.out`.
+- **`com.leftclaw.auth-refresh`** — every 6h runs `./cont auth ensure` to keep
+  the Claude OAuth token fresh (`/tmp/cont-auth-refresh.log`). Without it the
+  token expires and every agent VM fails to authenticate.
+
+Both `cd` into this repo's absolute path; if you move the repo, edit the
+`<string>…cd $HOME/…</string>` line in each plist.
+
+```bash
+UID=$(id -u)
+# load / reload after editing a plist
+launchctl bootstrap gui/$UID ~/Library/LaunchAgents/com.leftclaw.wrangler.plist
+launchctl kickstart -k gui/$UID/com.leftclaw.wrangler     # restart
+launchctl bootout    gui/$UID/com.leftclaw.wrangler       # stop / disable
+launchctl list | grep leftclaw                            # status (PID, exit code)
+```
+
+Don't also run a manual `nohup` copy while the launchd one is loaded — you'll
+get two wranglers fighting over the same VMs.
 
 ### What you actually need
 
