@@ -8,9 +8,10 @@ Work through your queue: finish anything in progress first, then pick up new aud
 
 Audit methodologies (read these before starting — they're your operating manual):
 
-- `~/skills/evm-audit-skills/evm-audit-master/SKILL.md` — the ethskills master index. Lists 19 specialized sub-skills for different domains (ERC20, ERC4626, AMM, lending, oracles, proxies, signatures, governance, …). Use the routing table in this file to pick which sub-skills apply to a given target.
+- `~/skills/two-phase-audit.md` — **the orchestrator you run.** Drives both methodologies below as one two-phase audit: phase 1 breadth (ethskills) → phase 2 depth (pashov), blind → hybrid reconciliation into one unified report. Read this first; it tells you exactly how to run the two phases and merge them.
+- `~/skills/evm-audit-skills/evm-audit-master/SKILL.md` — the ethskills master index (phase 1). Lists 19 specialized sub-skills for different domains (ERC20, ERC4626, AMM, lending, oracles, proxies, signatures, governance, …). Routing table picks which sub-skills apply to a target.
 - `~/skills/evm-audit-skills/evm-audit-<domain>/SKILL.md` — the per-domain sub-skills (one directory each).
-- `~/skills/pashov-skills/solidity-auditor/SKILL.md` — pashov's 4-turn methodology (8 specialized agents, dedup + gate eval).
+- `~/skills/pashov-skills/solidity-auditor/SKILL.md` — pashov's methodology (phase 2): 12 specialized attack agents (9 specialty + 3 gap-hunter), dedup + gate eval.
 
 Tooling:
 
@@ -47,30 +48,27 @@ Read the README files first so you know the available commands.
    ~/scripts/leftclaw/messages.sh <job_id>
    ```
 
-4. **First audit pass — ethskills.** Read `~/skills/evm-audit-skills/evm-audit-master/SKILL.md` and pick the relevant 5–8 sub-skill domains for this target. Apply each one. Save findings to `~/audits/<job_id>/ethskills-report.md`.
+4. **Run the two-phase audit.** Read `~/skills/two-phase-audit.md` and follow it end to end for this target, **with `--no-file`** (you deliver via BGIPFS + on-chain complete below, NOT GitHub issues). It runs phase 1 (ethskills breadth) → phase 2 (pashov depth, blind) → hybrid reconciliation. You are running **autonomously**, so at the skill's model-selection step do NOT ask a question — take the scope-scaled default (sonnet for a single small contract, opus for larger/multi-contract scope). Write its outputs under `~/audits/<job_id>/` and have the skill's unified report land at `~/audits/<job_id>/final-report.md`.
 
-5. **Log work** so the client sees progress:
+5. **Log work** after each phase so the client sees progress:
    ```
    ~/scripts/leftclaw/log-work.sh <job_id> "audit-pass-1-ethskills" "Found N high, M medium, K low"
+   ~/scripts/leftclaw/log-work.sh <job_id> "audit-pass-2-pashov"   "Phase 2 + reconciliation complete"
    ```
 
-6. **Second audit pass — pashov.** Read `~/skills/pashov-skills/solidity-auditor/SKILL.md` and apply that methodology. Save to `~/audits/<job_id>/pashov-report.md`.
-
-7. **Aggregate.** Merge both reports into `~/audits/<job_id>/final-report.md`: deduplicated, prioritized findings. Findings confirmed by both methodologies get a confidence boost; for disagreements, re-examine the code and reconcile.
-
-8. **Publish to BGIPFS.**
+6. **Publish to BGIPFS.**
    ```
    ~/scripts/bgipfs/upload.sh ~/audits/<job_id>/final-report.md
    ```
    The script prints a `URL:` line — capture that.
 
-9. **Complete on-chain.**
+7. **Complete on-chain.**
    ```
-   ~/scripts/leftclaw/complete.sh <job_id> "<URL from step 8>"
+   ~/scripts/leftclaw/complete.sh <job_id> "<URL from step 6>"
    ```
    Use the full `https://{CID}.ipfs.community.bgipfs.com/...` URL, not the bare CID.
 
-10. Briefly summarize what you did for this job (job id, severity counts, BGIPFS URL, tx hashes) and loop back to step 1.
+8. Briefly summarize what you did for this job (job id, severity counts, BGIPFS URL, tx hashes) and loop back to step 1.
 
 ## Verification standard
 

@@ -23,6 +23,15 @@ re-derive them:
 **Read both skill files at Turn 0** so you have their exact steps in front of you;
 the overrides below modify those steps, they do not replace them.
 
+**Report assembly — robust across runtimes.** Instruct every phase-1 and phase-2
+agent to **return its findings as its final message**, and have the orchestrator
+assemble `phase1-report.md` / `phase2-report.md` itself from those returned
+messages. Do NOT depend on sub-agents writing report files: in many runtimes
+sub-agents are sandboxed and file writes are blocked or land in an unreadable
+working dir. The orchestrator (you) writes all three report files. (Lesson from
+real runs: sub-agent file writes were silently blocked; the run only succeeded
+because findings came back in the agents' final messages.)
+
 ## Mode Selection & Flags
 
 Same as the sub-skills:
@@ -47,14 +56,29 @@ In one message:
 3. Create one shared audit dir: Bash `mktemp -d ./.audit-2phase-XXXXXX` → store as
    `{audit_dir}`. It will hold `phase1-report.md`, `phase2-report.md`,
    `unified-report.md`.
-4. **Model selection — once, here, not per phase.** This applies ONLY on Claude
-   Code (where both `AskUserQuestion` and the `Agent` tool's `model` parameter
-   exist). Run the pashov **Turn 1b** picker verbatim — detect your own model
-   family, `AskUserQuestion` with the three opus/sonnet/haiku options and their
-   preview boxes, default to your own family if no answer. Store the choice as
-   `{agent_model}`. On any runtime without those tools (Codex, Gemini, Cursor
-   native, …): SKIP this step, leave `{agent_model}` unset. `{agent_model}` is
-   applied to **both** phases' agents.
+4. **Scope sizing → default model.** Measure in-scope size: total `.sol` LOC and
+   contract count. Set `{scope}` = **small** if a single contract AND < ~300 in-scope
+   LOC, else **large**. Default `{agent_model}`: small → `sonnet`, large → `opus`.
+   Agent *count* never scales with size — the 6 checklist + 12 attack agents are the
+   methodology; independent perspectives are the point. Only the **model** scales.
+   (Lesson from real runs: on a tiny contract a dozen attack agents converge on the
+   same 1–2 leads — that redundancy is expected and the Turn 3 dedup collapses it;
+   do not treat N identical leads as N signals, and do not cut agents to save cost —
+   drop to `sonnet` instead.)
+
+5. **Model selection — once, here, not per phase.**
+   - **Interactive Claude Code** (both `AskUserQuestion` and the `Agent` tool's
+     `model` parameter exist, and a human is driving): run the pashov **Turn 1b**
+     picker — `AskUserQuestion` with the three opus/sonnet/haiku preview boxes,
+     pre-selecting the `{scope}` default as `(Recommended)`. Store the answer as
+     `{agent_model}`; if no answer, use the `{scope}` default.
+   - **Autonomous / headless** (no human to answer — e.g. the leftclaw auditor, cron,
+     a CI job): do **NOT** emit an interactive question. Use the `{scope}` default
+     for `{agent_model}` and proceed silently.
+   - **Runtimes without a `model` parameter** (Codex, Gemini, Cursor native, …):
+     SKIP model selection, leave `{agent_model}` unset (omit `model` on Agent calls).
+
+   `{agent_model}` is applied to **both** phases' agents.
 
 ### Turn 1 — Phase 1: breadth (ethskills)
 
@@ -128,10 +152,14 @@ A single reconciliation pass. Do not re-run either phase.
    - If `--file-output`: also write the unified report to the persisted path from
      `report-formatting.md`.
 
-6. **File GitHub issues — once.** Unless `--no-file`, file issues for the unified
-   Medium+ findings using the ethskills issue-filing convention (from the
-   evm-audit-skills master index / `report-formatting.md`). This is the only
-   issue-filing step in the whole flow.
+6. **Deliver — once.** The primary deliverable is always `unified-report.md`.
+   - Default (interactive, GitHub repo target): file issues for the unified Medium+
+     findings using the ethskills issue-filing convention (from the evm-audit-skills
+     master index / `report-formatting.md`). This is the only issue-filing step in
+     the flow.
+   - `--no-file`: do NOT file issues. The caller owns delivery — e.g. the leftclaw
+     auditor publishes `unified-report.md` to IPFS and completes the job on-chain.
+     Run `--no-file` whenever an external workflow handles report delivery.
 
 7. **Auto-clean.** `rm -rf {audit_dir}` after printing (and after any `--file-output`
    write to a persisted path). For debugging, copy it elsewhere first.

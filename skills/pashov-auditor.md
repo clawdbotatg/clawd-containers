@@ -30,12 +30,6 @@ f. Bash `mktemp -d ./.audit-XXXXXX` → store as `{bundle_dir}`
 
 If the remote VERSION fetch succeeds and differs from local, print `⚠️ You are not using the latest version. Please upgrade for best security coverage. See https://github.com/pashov/skills`. If it fails, skip silently.
 
-> **Phase mode:** when driven by the `deep-audit` (two-phase) skill, this runs as
-> phase 2, blind to phase 1. Two overrides apply: **skip Turn 1b** (the model is
-> already chosen by the orchestrator — use the injected `{agent_model}`), and run
-> as if `--file-output`, writing the Turn 4 report to the orchestrator's
-> `phase2-report.md`. No change when run standalone.
-
 **Turn 1b — Model selection (Claude Code only).** This turn applies ONLY when both `AskUserQuestion` and the `Agent` tool (with a `model` parameter) are available in your runtime — i.e., Claude Code. On Codex, Gemini, Cursor's native agent, or any runtime without these, SKIP this turn entirely, leave `{agent_model}` unset, and proceed to Turn 2. Do NOT emit the question as prose. Do NOT substitute any other mechanism.
 
 On Claude Code:

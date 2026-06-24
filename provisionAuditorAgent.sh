@@ -15,8 +15,9 @@
 #   - auditor.prompt.md         (the prompt — edit to change agent behavior)
 #   - scripts/bgipfs/           (deterministic credentialed helpers)
 #   - scripts/leftclaw/         (deterministic credentialed helpers)
-#   - skills/ethskills-audit.md (audit methodology, pre-fetched)
-#   - skills/pashov-auditor.md  (audit methodology, pre-fetched)
+#   - skills/two-phase-audit.md (the orchestrator the auditor runs)
+#   - skills/ethskills-audit.md (phase-1 methodology, pre-fetched)
+#   - skills/pashov-auditor.md  (phase-2 methodology, pre-fetched)
 
 set -euo pipefail
 SELF_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -63,7 +64,7 @@ done
 echo "==> installing ~/skills/ (full trees)"
 mkdir -p "$HOME/skills"
 # Top-level pointer files.
-for s in ethskills-audit.md pashov-auditor.md README.md; do
+for s in two-phase-audit.md ethskills-audit.md pashov-auditor.md README.md; do
   src="/tmp/skills/$s"
   if [[ -f "$src" ]]; then
     install -m 644 "$src" "$HOME/skills/$s"
