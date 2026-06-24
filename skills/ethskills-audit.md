@@ -59,6 +59,12 @@ https://raw.githubusercontent.com/austintgriffith/evm-audit-skills/main/<skill-n
 6. Synthesize all findings into `AUDIT-REPORT.md`
 7. File GitHub issues for Medium severity and above
 
+> **Phase mode:** when driven by the `deep-audit` (two-phase) skill, this runs as
+> phase 1. Two overrides apply: spawn agents with the orchestrator-chosen model
+> instead of hardcoded opus, and **STOP after step 6 — skip step 7** (the
+> two-phase flow files issues once after reconciliation). No change when run
+> standalone.
+
 ## Invocation
 
 ```
