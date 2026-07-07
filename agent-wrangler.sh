@@ -517,16 +517,17 @@ except Exception:
   pass' 2>/dev/null
       )
     fi
-    # Fresh boot for an open job (or my-jobs lookup failed): name the
-    # first OPEN job as before.
-    [[ -z "$jid" ]] && jid=$(get_first_job_id "$svc" "$env" || true)
     [[ -n "$jid" ]] && meta=$(get_job_meta "$jid" "$env" || true)
   fi
   local desc
   if [[ -n "$jid" && -n "$meta" ]]; then
     desc="job ${jid}: ${meta}"
   else
-    desc="(type-${svc})"
+    # Fresh boot toward the open queue: don't name a specific job — the
+    # agent picks its own on accept, and naming one here reads as "job N
+    # started" even when nothing was accepted (looked like duplicate
+    # starts to the client watching a job).
+    desc="(open type-${svc} queue)"
   fi
   local gold="${vm}-gold"
 
