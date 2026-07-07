@@ -18,7 +18,8 @@ GOLD="agent-gold"
 AGENT="claude"
 BUILDER="agent-base-build"
 
-vm_exists() { tart list --quiet --source local 2>/dev/null | grep -Fxq "$1"; }
+# awk, not grep -q: grep's early exit + pipefail = false negatives (SIGPIPE)
+vm_exists() { tart list --quiet --source local 2>/dev/null | awk -v n="$1" '$0==n{f=1} END{exit !f}'; }
 
 # 1. Bake the gold image once (fresh upstream macOS + provision.sh layer).
 if ! vm_exists "$GOLD"; then

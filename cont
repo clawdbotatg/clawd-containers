@@ -84,7 +84,10 @@ current_base() {
 }
 
 vm_exists() {
-  tart list --quiet --source local 2>/dev/null | grep -Fxq "$1"
+  # awk (not grep -q): under pipefail, grep -q's early exit SIGPIPEs tart
+  # and the pipeline goes false even on a match (~73% false-negative rate).
+  tart list --quiet --source local 2>/dev/null \
+    | awk -v n="$1" '$0==n{f=1} END{exit !f}'
 }
 
 vm_running() {

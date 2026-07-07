@@ -69,9 +69,9 @@ except Exception:
 
 vm_running() {
   # tart list output:  Source Name Disk Size Accessed State
-  tart list --quiet --source local 2>/dev/null | grep -Fxq "$VM" \
-    && tart list 2>/dev/null \
-       | awk -v vm="$VM" '$2==vm && $NF=="running"{f=1} END{exit !f}'
+  # awk only (no grep -q): grep's early exit + pipefail = SIGPIPE false negatives.
+  tart list 2>/dev/null \
+    | awk -v vm="$VM" '$1=="local" && $2==vm && $NF=="running"{f=1} END{exit !f}'
 }
 
 start_vm() {

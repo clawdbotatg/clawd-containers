@@ -112,7 +112,10 @@ reset_all_failures() {
 }
 
 log() {
-  printf '[%s] %s\n' "$(date '+%F %T')" "$*" | tee -a "$LOG"
+  # >&2: several helpers (job_advanceable via count_advanceable_open) run
+  # inside $(...) command substitutions — log lines on stdout would be
+  # captured into the caller's variable instead of reaching the console.
+  printf '[%s] %s\n' "$(date '+%F %T')" "$*" | tee -a "$LOG" >&2
 }
 
 # ── Telegram notifications ──────────────────────────────────────────────
@@ -465,16 +468,20 @@ except Exception:
   pass' 2>/dev/null
 }
 
+# NOTE: these must consume tart's FULL output (awk, not grep -q). Under
+# `set -o pipefail`, grep -q's early exit SIGPIPEs tart and the pipeline
+# goes false even on a match — measured ~73% false-negative rate, which
+# made the wrangler believe running VMs were stopped.
 vm_running() {
   local vm="$1"
-  tart list --quiet --source local 2>/dev/null | grep -Fxq "$vm" \
-    && tart list 2>/dev/null \
-       | awk -v vm="$vm" '$2==vm && $NF=="running"{f=1} END{exit !f}'
+  tart list 2>/dev/null \
+    | awk -v vm="$vm" '$1=="local" && $2==vm && $NF=="running"{f=1} END{exit !f}'
 }
 
 # Does a per-agent gold image exist? Fast path uses it.
 gold_exists() {
-  tart list --quiet --source local 2>/dev/null | grep -Fxq "$1"
+  tart list --quiet --source local 2>/dev/null \
+    | awk -v n="$1" '$0==n{f=1} END{exit !f}'
 }
 
 # Does a VM exist (any state)?
