@@ -498,11 +498,11 @@ start_vm() {
   local vm="$1" prov="$2" svc="${3:-?}" env="${4:-}" mine="${5:-0}"
   local jid="" meta=""
   if [[ -n "$env" && -f "$env" ]]; then
-    jid=$(get_first_job_id "$svc" "$env" || true)
-    # list-jobs.sh only returns OPEN jobs. If we're re-booting for an
-    # already-assigned/in-progress job (mine > 0), fall back to my-jobs.sh
-    # so the notification names the actual job instead of "type-N".
-    if [[ -z "$jid" && "$mine" =~ ^[1-9] ]]; then
+    # When re-booting for an already-assigned/in-progress job (mine > 0),
+    # the assigned job is what the agent will actually work — name that,
+    # not the first OPEN job (which made every reboot notify "job 300"
+    # while the VM was really re-working the assigned job).
+    if [[ "$mine" =~ ^[1-9] ]]; then
       jid=$(
         ( set -a; source "$env" 2>/dev/null; set +a
           ./scripts/leftclaw/my-jobs.sh "$svc" 2>/dev/null
@@ -517,6 +517,9 @@ except Exception:
   pass' 2>/dev/null
       )
     fi
+    # Fresh boot for an open job (or my-jobs lookup failed): name the
+    # first OPEN job as before.
+    [[ -z "$jid" ]] && jid=$(get_first_job_id "$svc" "$env" || true)
     [[ -n "$jid" ]] && meta=$(get_job_meta "$jid" "$env" || true)
   fi
   local desc
