@@ -23,6 +23,23 @@ set -euo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
 cd "$HERE"
 
+# macOS ships no `timeout` (it's GNU coreutils). host_oauth_ok and
+# agent_alive depend on it; without this shim every `timeout ...` call
+# is "command not found" (exit 127), which reads as check-failed and
+# pauses the fleet on a phantom dead-OAuth. Python is already a hard
+# dependency of this script.
+if ! command -v timeout >/dev/null 2>&1; then
+  timeout() {
+    python3 - "$@" <<'PY'
+import subprocess, sys
+try:
+    sys.exit(subprocess.run(sys.argv[2:], timeout=float(sys.argv[1])).returncode)
+except subprocess.TimeoutExpired:
+    sys.exit(124)
+PY
+  }
+fi
+
 # ── Agent registry ──────────────────────────────────────────────────────
 # Format: "service_type_id:vm_name:provisioner_script:env_file"
 # - service_type_id matches leftclaw's Job.serviceTypeId
