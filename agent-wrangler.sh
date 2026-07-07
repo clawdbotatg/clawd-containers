@@ -183,9 +183,32 @@ except Exception:
 # Job 188's failure mode: the host's claude OAuth token was stale, every
 # VM got a dead token, every boot stalled at the no-accept grace cliff.
 # We verify the host's auth works BEFORE booting any VM. If it doesn't,
-# we don't boot — we wait and alert. Cached for 5 min to keep the cost
-# down (one claude API call per check).
+# we don't boot — we wait and alert. Cached for 5 min to keep the cost down.
+#
+# IMPORTANT — what counts as "dead": the deterministic source of truth is the
+# macOS keychain token's own `expiresAt`, which Claude Code refreshes in the
+# background. A future expiresAt means auth is genuinely fine. We do NOT gate
+# on a live `claude -p` ping in the healthy path: that ping is flaky (API
+# latency spikes), and treating a slow ping as "OAuth is dead" was firing
+# false Telegram alarms + pausing the fleet while the token was perfectly
+# valid. The live ping is now only a fallback when the token is actually
+# at/past expiry (where a refresh may have just rotated it).
 HOST_OAUTH_CACHE_SECONDS="${HOST_OAUTH_CACHE_SECONDS:-300}"
+
+# Seconds until the keychain Claude token expires. Prints an integer (may be
+# negative if expired); prints nothing if the entry is missing/unreadable.
+host_oauth_seconds_left() {
+  security find-generic-password -s 'Claude Code-credentials' -w 2>/dev/null | python3 -c '
+import json,sys,time
+try:
+    o=json.load(sys.stdin)["claudeAiOauth"]
+    if not o.get("accessToken"): sys.exit(0)
+    print(int(o.get("expiresAt",0)/1000 - time.time()))
+except Exception:
+    pass
+' 2>/dev/null
+}
+
 host_oauth_ok() {
   local cache="$STATE_DIR/host_oauth.status"
   local stamp="$STATE_DIR/host_oauth.checked-at"
@@ -199,17 +222,30 @@ host_oauth_ok() {
       return $?
     fi
   fi
-  local out
-  out=$(timeout 20 zsh -lc 'claude -p --output-format text "reply with the single word OK"' 2>&1 || true)
-  date +%s > "$stamp"
-  case "$out" in
-    *OK*) echo "ok" > "$cache"; return 0 ;;
-    *)
-      echo "fail" > "$cache"
-      log "STUCK: host claude auth check FAILED — output: ${out:0:200}"
-      return 1
-      ;;
-  esac
+
+  # Healthy path: keychain token still valid (>2 min headroom). Deterministic,
+  # no network call, no false alarms. This is the normal state.
+  local left
+  left=$(host_oauth_seconds_left)
+  if [[ -n "$left" ]] && (( left > 120 )); then
+    date +%s > "$stamp"; echo "ok" > "$cache"; return 0
+  fi
+
+  # Token missing / expired / near-expiry. The background refresh may have
+  # just rotated it, so confirm with a live ping (which itself triggers a
+  # refresh if needed). Retry to absorb transient slowness — only a genuine,
+  # repeated failure here means auth is actually dead and worth alerting on.
+  local out="" attempt
+  for attempt in 1 2 3; do
+    out=$(timeout 25 zsh -lc 'claude -p --output-format text "reply with the single word OK"' 2>&1 || true)
+    case "$out" in
+      *OK*) date +%s > "$stamp"; echo "ok" > "$cache"; return 0 ;;
+    esac
+    (( attempt < 3 )) && sleep 5
+  done
+  date +%s > "$stamp"; echo "fail" > "$cache"
+  log "STUCK: host claude OAuth genuinely dead — keychain token expired (${left:-no-token}s) AND 3 live pings failed. last: ${out:0:160}"
+  return 1
 }
 
 # ── Per-job pre-flight ──────────────────────────────────────────────────
