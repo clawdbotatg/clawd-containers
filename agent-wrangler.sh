@@ -55,6 +55,7 @@ LOG="${LOG:-/tmp/agent-wrangler.log}"
 TIME_CAP_DEFAULT_SECONDS="${TIME_CAP_DEFAULT_SECONDS:-3600}"   # 1h
 TIME_CAP_BUILDER_SECONDS="${TIME_CAP_BUILDER_SECONDS:-7200}"   # 2h
 TIME_CAP_FEATURE_SECONDS="${TIME_CAP_FEATURE_SECONDS:-7200}"   # 2h
+TIME_CAP_AUDITOR_SECONDS="${TIME_CAP_AUDITOR_SECONDS:-7200}"   # 2h — real audits were hitting the 1h cap
 
 # Per-VM start-time markers. Used to compute elapsed for the cap.
 STATE_DIR="${TMPDIR:-/tmp}/agent-wrangler"
@@ -413,6 +414,7 @@ cap_for() {
   case "$1" in
     builder) echo "$TIME_CAP_BUILDER_SECONDS" ;;
     feature) echo "$TIME_CAP_FEATURE_SECONDS" ;;
+    auditor) echo "$TIME_CAP_AUDITOR_SECONDS" ;;
     *)       echo "$TIME_CAP_DEFAULT_SECONDS" ;;
   esac
 }
