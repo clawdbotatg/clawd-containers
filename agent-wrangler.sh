@@ -567,12 +567,50 @@ except Exception:
   fi
 
   log "  bouncing $vm so fresh Aqua login fires the LaunchAgent"
+  # Graceful in-guest halt BEFORE tart stop: a hard stop can roll back the
+  # freshly-synced Tier-3 writes (env/scripts/prompt), reverting the VM to
+  # the gold image's baked state — it then runs as whatever identity/agent
+  # was baked at gold-bake time (2026-07-07: VMs silently became the old
+  # May bot and worked jobs as the stale baked wallet).
+  local _vm_ip
+  _vm_ip=$(./cont ip "$vm" 2>/dev/null || true)
+  if [[ -n "$_vm_ip" ]]; then
+    sshpass -p admin ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
+      -o ConnectTimeout=8 "admin@${_vm_ip}" \
+      'sync; sync; echo admin | sudo -S shutdown -h now' >/dev/null 2>&1 || true
+    sleep 10
+  fi
   ./cont down "$vm" >>"$LOG" 2>&1 || true
   sleep 3
   if ! ./cont up "$vm" >>"$LOG" 2>&1; then
     log "  cont up failed (tart 2-VM cap?) — see $LOG"
     notify "🔴 ${vm} failed to start ${desc}"
     return 1
+  fi
+  # Post-bounce verification (auditor instances): the provisioned agent env
+  # must have survived the bounce. If it rolled back, this VM is running the
+  # gold image's baked identity, not the agent we provisioned — recycle loudly.
+  if [[ "$vm" == auditor* ]]; then
+    local _verify_ip _tries _envstate=""
+    for _tries in 1 2 3 4 5 6; do
+      sleep 15
+      _verify_ip=$(./cont ip "$vm" 2>/dev/null || true)
+      [[ -z "$_verify_ip" ]] && continue
+      _envstate=$(sshpass -p admin ssh -o StrictHostKeyChecking=no \
+        -o UserKnownHostsFile=/dev/null -o ConnectTimeout=8 \
+        "admin@${_verify_ip}" 'test -s ~/.env.auditor && echo PRESENT || echo MISSING' 2>/dev/null || true)
+      [[ -n "$_envstate" ]] && break
+    done
+    if [[ "$_envstate" == "MISSING" ]]; then
+      log "  WARNING: $vm rolled back in bounce — agent env missing; recycling"
+      notify "🔴 ${vm} rolled back during bounce (env missing) — recycling"
+      ./cont down "$vm" >>"$LOG" 2>&1 || true
+      return 1
+    elif [[ "$_envstate" == "PRESENT" ]]; then
+      log "  post-bounce verify: agent env present in $vm"
+    else
+      log "  post-bounce verify: $vm unreachable over ssh — proceeding, watch for ghost agent"
+    fi
   fi
   mark_started "$vm"
   notify "🟢 ${vm} starting ${desc}"
