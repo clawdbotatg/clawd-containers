@@ -83,7 +83,10 @@ for d in evm-audit-skills pashov-skills; do
 done
 
 # --- .env.auditor and prompt file --------------------------------------
-ENV_SRC="/tmp/.env.auditor"
+# AGENT_ENV_FILE lets one provisioner serve multiple auditor instances
+# (auditor2 was silently getting auditor1's wallet before this, so its
+# agent saw auditor1's in-progress job as "mine" and never accepted work).
+ENV_SRC="/tmp/${AGENT_ENV_FILE:-.env.auditor}"
 ENV_DST="$HOME/.env.auditor"
 if [[ -f "$ENV_SRC" ]]; then
   echo "==> installing $ENV_DST (mode 600)"

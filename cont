@@ -553,6 +553,11 @@ cmd_provision() {
   if [[ "${CONT_PROVISION_FAST:-}" == "1" ]]; then
     fast_env="CONT_PROVISION_FAST=1 "
   fi
+  # Forward the per-agent env filename so one provisioner can serve
+  # multiple instances of the same agent type (auditor vs auditor2).
+  if [[ -n "${AGENT_ENV_FILE:-}" ]]; then
+    fast_env="${fast_env}AGENT_ENV_FILE='${AGENT_ENV_FILE}' "
+  fi
 
   echo "==> running ${fast_env}$script_name in $name ..."
   _vssh "${fast_env}bash /tmp/$script_name && sync && sync"
