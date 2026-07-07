@@ -36,6 +36,7 @@ cd "$HERE"
 # are stopped on each tick so the cap is freed up as queues drain.
 AGENTS=(
   "4:auditor:provisionAuditorAgent.sh:.env.auditor"
+  "4:auditor2:provisionAuditorAgent.sh:.env.auditor2"
   "5:frontendqa:provisionFrontendQAAgent.sh:.env.frontend-qa"
   "6:builder:provisionBuilderAgent.sh:.env.builder"
   "7:research:provisionResearchAgent.sh:.env.research"
