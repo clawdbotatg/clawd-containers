@@ -418,7 +418,7 @@ cap_for() {
   case "$1" in
     builder) echo "$TIME_CAP_BUILDER_SECONDS" ;;
     feature) echo "$TIME_CAP_FEATURE_SECONDS" ;;
-    auditor) echo "$TIME_CAP_AUDITOR_SECONDS" ;;
+    auditor*) echo "$TIME_CAP_AUDITOR_SECONDS" ;;
     *)       echo "$TIME_CAP_DEFAULT_SECONDS" ;;
   esac
 }
