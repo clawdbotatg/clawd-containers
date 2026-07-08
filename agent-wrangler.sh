@@ -518,6 +518,62 @@ agent_alive() {
   timeout 8 ./cont ssh "$vm" 'pgrep -f "[c]laude" >/dev/null 2>&1' 2>/dev/null
 }
 
+# First job assigned to this wallet (OPEN/IN_PROGRESS), or empty.
+get_assigned_job_id() {
+  local svc="$1" env="$2"
+  ( set -a; source "$env" 2>/dev/null; set +a
+    ./scripts/leftclaw/my-jobs.sh "$svc" 2>/dev/null
+  ) | python3 -c 'import json,sys
+try:
+  d = json.load(sys.stdin)
+  if isinstance(d, list) and d:
+    jid = d[0].get("id")
+    if jid is not None:
+      print(jid)
+except Exception:
+  pass' 2>/dev/null
+}
+
+# Comma-separated list of all OPEN job ids for a service type, or empty.
+get_open_job_ids() {
+  local svc="$1" env="$2"
+  ( set -a; source "$env" 2>/dev/null; set +a
+    ./scripts/leftclaw/list-jobs.sh "$svc" 2>/dev/null
+  ) | python3 -c 'import json,sys
+try:
+  d = json.load(sys.stdin)
+  if isinstance(d, list) and d:
+    print(", ".join(str(j.get("id")) for j in d if j.get("id") is not None))
+except Exception:
+  pass' 2>/dev/null
+}
+
+# Detect and announce job completions. Remembers the job a VM was working
+# ($STATE_DIR/<vm>.current-job); when that job leaves the wallet queue,
+# checks its on-chain status and notifies on COMPLETED(2).
+track_job_completion() {
+  local vm="$1" svc="$2" env="$3" mine="$4"
+  local f="$STATE_DIR/$vm.current-job"
+  local prev="" cur=""
+  [[ -f "$f" ]] && prev=$(cat "$f" 2>/dev/null)
+  if [[ "$mine" =~ ^[1-9] ]]; then
+    cur=$(get_assigned_job_id "$svc" "$env")
+  fi
+  if [[ -n "$prev" && "$prev" != "$cur" ]]; then
+    local st
+    st=$( ( set -a; source "$env" 2>/dev/null; set +a
+            ./scripts/leftclaw/get-job.sh "$prev" 2>/dev/null
+          ) | python3 -c 'import json,sys
+try: print(json.load(sys.stdin).get("status",""))
+except Exception: pass' 2>/dev/null )
+    if [[ "$st" == "2" ]]; then
+      log "$vm: job $prev completed"
+      notify "✅ ${vm} completed job ${prev}"
+    fi
+  fi
+  if [[ -n "$cur" ]]; then echo "$cur" > "$f"; else rm -f "$f"; fi
+}
+
 start_vm() {
   local vm="$1" prov="$2" svc="${3:-?}" env="${4:-}" mine="${5:-0}"
   local jid="" meta=""
@@ -527,31 +583,25 @@ start_vm() {
     # not the first OPEN job (which made every reboot notify "job 300"
     # while the VM was really re-working the assigned job).
     if [[ "$mine" =~ ^[1-9] ]]; then
-      jid=$(
-        ( set -a; source "$env" 2>/dev/null; set +a
-          ./scripts/leftclaw/my-jobs.sh "$svc" 2>/dev/null
-        ) | python3 -c 'import json,sys
-try:
-  d = json.load(sys.stdin)
-  if isinstance(d, list) and d:
-    jid = d[0].get("id")
-    if jid is not None:
-      print(jid)
-except Exception:
-  pass' 2>/dev/null
-      )
+      jid=$(get_assigned_job_id "$svc" "$env")
     fi
     [[ -n "$jid" ]] && meta=$(get_job_meta "$jid" "$env" || true)
   fi
   local desc
   if [[ -n "$jid" && -n "$meta" ]]; then
-    desc="job ${jid}: ${meta}"
+    desc="resuming assigned job ${jid}: ${meta}"
   else
-    # Fresh boot toward the open queue: don't name a specific job — the
-    # agent picks its own on accept, and naming one here reads as "job N
-    # started" even when nothing was accepted (looked like duplicate
-    # starts to the client watching a job).
-    desc="(open type-${svc} queue)"
+    # Fresh boot toward the open queue: list the open job ids rather than
+    # claiming a specific one — the agent picks its own on accept, and
+    # naming one here reads as "job N started" even when nothing was
+    # accepted (looked like duplicate starts to the client watching a job).
+    local open_ids
+    open_ids=$( [[ -n "$env" && -f "$env" ]] && get_open_job_ids "$svc" "$env" || true )
+    if [[ -n "$open_ids" ]]; then
+      desc="for open type-${svc} jobs: ${open_ids}"
+    else
+      desc="(open type-${svc} queue)"
+    fi
   fi
   local gold="${vm}-gold"
 
@@ -729,6 +779,8 @@ while :; do
     mine=$(count_my_queue "$svc" "$env")
     open=${open:-?}
     mine=${mine:-?}
+
+    track_job_completion "$vm" "$svc" "$env" "$mine"
 
     if vm_running "$vm"; then
       # If the wrangler restarted while a VM was already running, the
