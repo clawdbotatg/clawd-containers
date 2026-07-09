@@ -95,6 +95,18 @@ MAX_VMS="${MAX_VMS:-1}"
 # in a flat file (bash 3.2 on macOS lacks associative arrays).
 FAILURES_FILE="$STATE_DIR/failures.txt"
 
+# Per-JOB time-cap strike counter ("<job_id> <count>" lines). Every cap
+# hit while a job is assigned counts a strike; a job gets one free
+# resume, and at MAX_CAP_STRIKES the wrangler stops rebooting for it.
+# We'd prefer to decline the job back to the pool, but the contract's
+# declineJob requires status OPEN (reverts "!open" once accepted) — an
+# accepted job only leaves IN_PROGRESS via completeJob (worker) or
+# cancelJob (client/owner). So: try decline (works iff never accepted),
+# else park the job and alert a human. Clear a park manually with
+#   sed -i '' '/^<job_id> /d' "$CAP_STRIKES_FILE"
+MAX_CAP_STRIKES="${MAX_CAP_STRIKES:-2}"
+CAP_STRIKES_FILE="$STATE_DIR/cap_strikes.txt"
+
 # Telegram dedup buffer: hash -> last-sent-timestamp. Prevents duplicate
 # notifications when multiple wranglers run or retries happen rapidly.
 # Stored as "<hash> <timestamp>" lines in a flat file.
@@ -259,7 +271,11 @@ host_oauth_ok() {
   # repeated failure here means auth is actually dead and worth alerting on.
   local out="" attempt
   for attempt in 1 2 3; do
-    out=$(timeout 25 zsh -lc 'claude -p --output-format text "reply with the single word OK"' 2>&1 || true)
+    # unset INSIDE the login shell: .zprofile exports CLAUDE_CONFIG_DIR
+    # (harness account), but the credential the VMs ship is the DEFAULT
+    # account's keychain entry — pinging the harness account gives a false
+    # "ok" while the fleet's actual token is dead (2026-07-09, 28h outage).
+    out=$(timeout 25 zsh -lc 'unset CLAUDE_CONFIG_DIR; claude -p --output-format text "reply with the single word OK"' 2>&1 || true)
     case "$out" in
       *OK*) date +%s > "$stamp"; echo "ok" > "$cache"; return 0 ;;
     esac
@@ -790,6 +806,25 @@ while :; do
       cap=$(cap_for "$vm")
       elapsed=$(elapsed_seconds "$vm")
       if (( elapsed > cap )); then
+        # Strike the assigned job (if any) before recycling. On the
+        # MAX_CAP_STRIKES'th strike, try to give the job back: decline
+        # works iff it was never accepted; an accepted job can't be
+        # declined ("!open"), so tell the client and park it — the boot
+        # gate below then refuses to reboot for it.
+        jid=$(get_assigned_job_id "$svc" "$env")
+        if [[ -n "$jid" ]]; then
+          strikes=$(( $(kv_get "$jid" "$CAP_STRIKES_FILE") + 1 ))
+          kv_set "$jid" "$strikes" "$CAP_STRIKES_FILE"
+          log "  job $jid: time-cap strike ${strikes}/${MAX_CAP_STRIKES}"
+          if (( strikes >= MAX_CAP_STRIKES )); then
+            if host_decline "$jid" "$env" "exceeded ${cap}s time cap ${strikes}x"; then
+              kv_set "$jid" 0 "$CAP_STRIKES_FILE"
+            else
+              host_post_message "$jid" "$env" "Worker note: this job has twice exceeded the worker's ${cap}s compute budget without completing, and an accepted job cannot be declined on-chain. Please cancel the job to release it back to the pool, or expect it to remain stalled." || true
+              notify "⛔ job ${jid} (${vm}) hit the ${cap}s time cap ${strikes}x — PARKED. Can't decline an accepted job; ask the client to cancel, or raise the cap and clear job ${jid} from ${CAP_STRIKES_FILE}."
+            fi
+          fi
+        fi
         stop_vm "$vm" "TIME CAP EXCEEDED (${elapsed}s > ${cap}s) — runaway/stuck session, force-stopping"
       elif [[ "$mine" == "0" && "$open" == "0" ]]; then
         stop_vm "$vm"
@@ -819,6 +854,19 @@ while :; do
       fi
     else
       if [[ "$mine" =~ ^[1-9] || "$open" =~ ^[1-9] ]]; then
+        # Parked-job gate: a job at MAX_CAP_STRIKES blocks this agent
+        # entirely — booting even for OTHER open jobs is pointless,
+        # because the in-VM protocol is "finish IN_PROGRESS first", so
+        # any boot resumes the parked job and burns another full cap.
+        # Unblocks when the client cancels (job leaves my-jobs) or the
+        # job's line is removed from CAP_STRIKES_FILE.
+        if [[ "$mine" =~ ^[1-9] ]]; then
+          jid=$(get_assigned_job_id "$svc" "$env")
+          if [[ -n "$jid" ]] && (( $(kv_get "$jid" "$CAP_STRIKES_FILE") >= MAX_CAP_STRIKES )); then
+            log "$vm: assigned job $jid is PARKED (${MAX_CAP_STRIKES} time-cap strikes) — not booting; client cancel or clear it from $CAP_STRIKES_FILE"
+            continue
+          fi
+        fi
         fails=$(kv_get "$vm" "$FAILURES_FILE")
         if (( fails >= MAX_START_RETRIES )); then
           log "$vm: backing off — ${fails} consecutive start failures (will retry when queue empties)"
