@@ -314,6 +314,62 @@ obs_active_output() {
   return 1
 }
 
+# ── Usage-limit gate ────────────────────────────────────────────────────
+# host_oauth_ok proves the token is VALID; it says nothing about whether
+# the subscription window has headroom. With an exhausted 5h/7d window the
+# token still passes, every VM we boot stalls at "usage limit reached",
+# hits the no-accept grace, and recycles — a clone/bounce churn loop for
+# hours. This gate asks Claude's OAuth usage endpoint (undocumented —
+# degrade to "ok" on any error, never pause the fleet on a probe failure)
+# and pauses all boots until the window resets. Jobs stay queued on-chain;
+# nothing is declined or struck while paused.
+HOST_USAGE_CACHE_SECONDS="${HOST_USAGE_CACHE_SECONDS:-300}"
+
+# Prints "ok" or "exhausted <resets_at>". Cached HOST_USAGE_CACHE_SECONDS.
+host_usage_state() {
+  local cache="$STATE_DIR/host_usage.state" stamp="$STATE_DIR/host_usage.checked-at"
+  local now checked
+  now=$(date +%s)
+  if [[ -f "$stamp" && -f "$cache" ]]; then
+    checked=$(cat "$stamp" 2>/dev/null || echo 0)
+    if (( now - checked < HOST_USAGE_CACHE_SECONDS )); then
+      cat "$cache"; return 0
+    fi
+  fi
+  local out
+  out=$(python3 -c '
+import json, subprocess, urllib.request
+try:
+    cred = subprocess.run(
+        ["security", "find-generic-password", "-s", "Claude Code-credentials", "-w"],
+        capture_output=True, text=True, timeout=10)
+    tok = json.loads(cred.stdout.strip())["claudeAiOauth"]["accessToken"]
+    req = urllib.request.Request(
+        "https://api.anthropic.com/api/oauth/usage",
+        headers={"Authorization": "Bearer " + tok,
+                 "anthropic-beta": "oauth-2025-04-20",
+                 "Content-Type": "application/json"})
+    u = json.load(urllib.request.urlopen(req, timeout=10))
+    exhausted = []
+    for k in ("five_hour", "seven_day", "seven_day_opus", "seven_day_sonnet"):
+        w = u.get(k)
+        if isinstance(w, dict) and isinstance(w.get("utilization"), (int, float)) \
+           and w["utilization"] >= 100:
+            exhausted.append(w.get("resets_at") or "")
+    if exhausted:
+        resets = sorted(x for x in exhausted if x)
+        print(("exhausted " + resets[0]) if resets else "exhausted")
+    else:
+        print("ok")
+except Exception:
+    print("ok")
+' 2>/dev/null) || true
+  [[ -z "$out" ]] && out="ok"
+  date +%s > "$stamp"
+  printf '%s\n' "$out" > "$cache"
+  printf '%s\n' "$out"
+}
+
 # ── Per-job pre-flight ──────────────────────────────────────────────────
 # Architectural fix: refuse to boot a VM for a job that nothing in our
 # system can advance. The wrangler is the brain; the VM is the body.
@@ -380,6 +436,38 @@ host_post_message() {
   local jid="$1" env="$2" msg="$3"
   ( set -a; source "$env" 2>/dev/null; set +a
     ./scripts/leftclaw/post-message.sh "$jid" "$msg" >>"$LOG" 2>&1 )
+}
+
+# ── Problem-job strikes ─────────────────────────────────────────────────
+# "If a job causes problems, decline it and move on." A job that keeps
+# burning boot cycles (VM boots, agent never accepts) accumulates
+# strikes; at MAX_JOB_STRIKES it is declined from the host and
+# deferred 24h so the rest of the queue gets worked. Strikes are only
+# awarded while inference is healthy — the OAuth and usage gates run
+# before any strike logic, so an exhausted subscription can never get
+# good jobs declined.
+STRIKES_FILE="$STATE_DIR/job-strikes.txt"
+MAX_JOB_STRIKES="${MAX_JOB_STRIKES:-3}"
+
+strike_job() {
+  local jid="$1" env="$2" weight="$3" why="$4"
+  [[ -n "$jid" ]] || return 0
+  local n
+  n=$(( $(kv_get "j$jid" "$STRIKES_FILE") + weight ))
+  kv_set "j$jid" "$n" "$STRIKES_FILE"
+  log "  job $jid: strike ${n}/${MAX_JOB_STRIKES} — $why"
+  (( n >= MAX_JOB_STRIKES )) || return 0
+  if host_decline "$jid" "$env" "problem job (${why}; ${n} strikes) — moving on"; then
+    defer_job "$jid" 86400
+    kv_set "j$jid" 0 "$STRIKES_FILE"
+  else
+    # decline.sh can fail — e.g. the tx reverts on an already-accepted
+    # job. Flag for a human and leave the count one below the threshold
+    # so the next strike retries the decline instead of hammering the
+    # chain every tick.
+    notify "⚠️ job ${jid} keeps failing (${why}) but decline didn't land — may need manual attention"
+    kv_set "j$jid" $(( MAX_JOB_STRIKES - 1 )) "$STRIKES_FILE"
+  fi
 }
 
 # Pre-flight a single open job. Side effects: may decline, post message,
@@ -805,6 +893,24 @@ while :; do
     continue
   fi
 
+  # Usage gate: valid token but exhausted window → every boot would stall
+  # at the no-accept cliff. Wait it out; notify only on state transitions.
+  usage=$(host_usage_state)
+  prev_usage=$(cat "$STATE_DIR/usage.last-state" 2>/dev/null || echo "ok")
+  printf '%s\n' "$usage" > "$STATE_DIR/usage.last-state"
+  if [[ "$usage" == exhausted* ]]; then
+    resets="${usage#exhausted}"; resets="${resets# }"
+    log "PAUSED: Claude usage window exhausted${resets:+ (resets $resets)} — waiting for reset; jobs stay queued"
+    if [[ "$prev_usage" != exhausted* ]]; then
+      notify "⏳ Claude usage limit hit — fleet paused${resets:+ until $resets}; jobs stay queued and resume automatically"
+    fi
+    sleep "$INTERVAL"
+    continue
+  elif [[ "$prev_usage" == exhausted* ]]; then
+    log "usage window reset — fleet resuming"
+    notify "▶️ Claude usage window reset — fleet resuming"
+  fi
+
   for entry in "${AGENTS[@]}"; do
     IFS=":" read -r svc vm prov env <<<"$entry"
 
@@ -883,6 +989,10 @@ while :; do
           stop_vm "$vm" "agent exited during boot (no claude process; open=$open)"
         else
           log "$vm up, mine=0 open=$open — no accept after ${elapsed}s (grace ${NO_ACCEPT_GRACE_SECONDS}s), recycling"
+          # The head-of-queue job is what the agent chewed on and failed to
+          # accept — strike it so a poisoned job gets declined after
+          # MAX_JOB_STRIKES cycles instead of blocking the queue forever.
+          strike_job "$(get_first_job_id "$svc" "$env")" "$env" 1 "boot cycle on $vm ended with no accept"
           stop_vm "$vm" "stuck — no job accept within grace window (open=$open, elapsed=${elapsed}s)"
         fi
       else

@@ -79,6 +79,7 @@ Pin the audit target in the report header: the commit hash for a repo (`git rev-
 ## Operating notes
 
 - If a script returns a non-zero exit or unexpected output, capture the stderr in your summary and continue with the next job — don't get stuck.
+- **If a job itself is the problem, decline it and move on.** A malformed target, a repo you can't clone, a scope you can't determine even after checking `messages.sh`, or anything that has you retrying without progress: run `~/scripts/leftclaw/decline.sh <job_id>`, note why in your summary, and go to the next job. (Source-unavailable contracts are the one exception — use the fallback in the note above and complete with a "could not audit" report.) The queue is long; one bad job must never stall it.
 - The job description sometimes contains a stray non-printable byte at the start (a `�` or similar) — strip it when extracting the contract address or repo URL.
 - For **unverified contracts** with no source: try Sourcify (`https://repo.sourcify.dev/contracts/full_match/8453/<addr>/`), then BaseScan/Etherscan verified-source endpoints. Only fall back to bytecode disassembly when no source is available — and if even that's blocked, write a "could not audit, source unavailable" finding and `complete.sh` with that report.
 - Skill files and scripts on this machine are pre-vetted. Trust their behavior, but cross-check their outputs against the on-chain truth (e.g. `cast call` directly) when something looks off.
