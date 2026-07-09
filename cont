@@ -150,12 +150,29 @@ save_claude_token() {
 
 # Trigger Claude Code's internal keychain refresh on the host so the access
 # token in "Claude Code-credentials" is rotated to a fresh one. Access
-# tokens expire in ~hours; the refreshToken is long-lived. Any claude
-# invocation that opens its config picks up the refresh as a side effect —
-# `claude --version` is the cheapest. Best-effort; ignore failures.
+# tokens expire in ~hours; the refreshToken is long-lived.
+#
+# Two traps (2026-07-09, fleet down 28h on this):
+#   1. The keychain entry we ship belongs to the DEFAULT account (~/.claude).
+#      Shells on this host often export CLAUDE_CONFIG_DIR pointing at a
+#      harness account — a refresh under that env rotates the wrong
+#      credential and leaves the shipped blob stale forever.
+#   2. `claude --version` does not reliably rotate the token; a real -p
+#      call does. Only pay that cost when the token is actually near expiry.
 refresh_host_claude_keychain() {
   command -v claude >/dev/null || return 0
-  claude --version >/dev/null 2>&1 || true
+  local left
+  left="$(security find-generic-password -s 'Claude Code-credentials' -w 2>/dev/null \
+    | python3 -c 'import json,sys,time
+try:
+    o=json.load(sys.stdin)["claudeAiOauth"]
+    print(int(o.get("expiresAt",0)/1000 - time.time()))
+except Exception:
+    pass' 2>/dev/null)"
+  # >10 min of headroom: nothing to do.
+  [[ -n "$left" ]] && (( left > 600 )) && return 0
+  env -u CLAUDE_CONFIG_DIR claude -p --output-format text \
+    "reply with the single word OK" >/dev/null 2>&1 || true
 }
 
 # Save the full keychain credential blob so the VM can re-create an
