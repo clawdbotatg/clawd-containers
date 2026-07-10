@@ -286,6 +286,34 @@ host_oauth_ok() {
   return 1
 }
 
+# ── OBS gate ────────────────────────────────────────────────────────────
+# Recording/streaming happens from this host, and a VM boot mid-recording
+# steals enough CPU to drop frames. Hold the fleet while OBS has an ACTIVE
+# OUTPUT — a write-handle on a media file (recording) or an established
+# RTMP session (streaming). OBS merely being OPEN does not pause the fleet:
+# the 2026-07-08 process-exists gate (a live edit, never committed) left
+# the fleet dark for 2 days because OBS never quits on this machine.
+#
+# NOTE: awk consumes full lsof output (not grep -q) — under pipefail a
+# grep -q early exit SIGPIPEs lsof and a true match reads as false, same
+# bug as the tart list checks (d4d2baf).
+obs_active_output() {
+  local pid
+  pid=$(pgrep -x OBS 2>/dev/null | head -1)
+  [[ -n "$pid" ]] || return 1
+  # Recording: write-mode ('w' or 'u') handle on a media container.
+  if lsof -p "$pid" 2>/dev/null \
+       | awk '$4 ~ /[0-9][wu]/ && $NF ~ /\.(mkv|mp4|mov|flv|ts)$/ {f=1} END{exit !f}'; then
+    return 0
+  fi
+  # Streaming: established RTMP(S) connection.
+  if lsof -a -p "$pid" -iTCP -sTCP:ESTABLISHED 2>/dev/null \
+       | awk 'tolower($0) ~ /rtmp|:1935/ {f=1} END{exit !f}'; then
+    return 0
+  fi
+  return 1
+}
+
 # ── Per-job pre-flight ──────────────────────────────────────────────────
 # Architectural fix: refuse to boot a VM for a job that nothing in our
 # system can advance. The wrangler is the brain; the VM is the body.
@@ -765,6 +793,14 @@ while :; do
   if ! host_oauth_ok; then
     log "STUCK: host claude OAuth is dead — fleet paused this tick. Fix with 'claude /login' on the host."
     notify "🔴 host claude OAuth is dead — fleet paused; run 'claude /login' on host"
+    sleep "$INTERVAL"
+    continue
+  fi
+
+  # OBS gate: no boots or stops while a recording/stream is live. Jobs
+  # stay queued and the fleet resumes automatically when the output ends.
+  if obs_active_output; then
+    log "OBS is actively recording/streaming — fleet paused this tick (jobs stay queued)"
     sleep "$INTERVAL"
     continue
   fi
