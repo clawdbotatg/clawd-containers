@@ -63,15 +63,18 @@ done
 
 echo "==> installing ~/skills/ (full trees)"
 mkdir -p "$HOME/skills"
-# Top-level pointer files.
-for s in two-phase-audit.md ethskills-audit.md pashov-auditor.md README.md; do
+# Top-level pointer files. two-phase-audit-v2.md is the LIVE orchestrator
+# (adds a context-building Phase 0 in front of breadth+depth); two-phase-audit.md
+# (v1) is kept as the fallback/reference and is still used by host-auditor.
+for s in two-phase-audit-v2.md two-phase-audit.md audit-context.md ethskills-audit.md pashov-auditor.md README.md; do
   src="/tmp/skills/$s"
   if [[ -f "$src" ]]; then
     install -m 644 "$src" "$HOME/skills/$s"
   fi
 done
-# Full repos: evm-audit-skills (19 sub-skills) and pashov-skills/solidity-auditor.
-for d in evm-audit-skills pashov-skills; do
+# Full repos: evm-audit-skills (19 sub-skills), pashov-skills/solidity-auditor,
+# and tob-audit-context (the Phase-0 function-analyzer + reference resources).
+for d in evm-audit-skills pashov-skills tob-audit-context; do
   src="/tmp/skills/$d"
   if [[ -d "$src" ]]; then
     rm -rf "$HOME/skills/$d"
