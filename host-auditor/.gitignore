@@ -1,0 +1,9 @@
+# Per-job state — cloned untrusted repos, audit workspaces, reports,
+# on-chain/IPFS records, logs. Never commit: contains untrusted third-party
+# code and job-specific artifacts.
+jobs/
+
+# Secrets never live here (they're read from ../.env.auditor), but guard
+# against an accidental local copy.
+*.env
+.env.*

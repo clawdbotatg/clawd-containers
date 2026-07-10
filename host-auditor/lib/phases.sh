@@ -1,0 +1,246 @@
+#!/usr/bin/env bash
+# phases.sh — the eight phase functions. Each is IDEMPOTENT against the real
+# surface (on-chain status, an artifact file, a recorded URL), so re-running
+# after a stop continues instead of redoing. Sourced by audit.sh, which sets:
+#   JOB_ID, JOB_DIR, HERE (host-auditor/), REPO_ROOT (clawd-containers/),
+#   LC (=$REPO_ROOT/scripts/leftclaw), BG (=$REPO_ROOT/scripts/bgipfs),
+#   SKILLS (=$REPO_ROOT/skills), GO (0/1 dry-run vs execute).
+# and has sourced state.sh, sandbox.sh, safety.sh.
+#
+# Env discipline: key-holding phases (intake msg-auth, accept, publish,
+# complete) source ../.env.auditor. The AUDIT phase never does — claude runs
+# there under `env -i` in the jail, so no wallet var is in scope and the
+# secret files are kernel-unreadable. This is the core invariant.
+
+CONTRACT="0xb2fb486a9569ad2c97d9c73936b46ef7fdaa413a"
+
+_would() { [[ "$GO" == "1" ]] && return 1; echo "  PLAN: would $*"; return 0; }
+
+# Strip the write-capable wallet secrets before handing control to claude in
+# the jailed audit/judge phases. These phases never source .env.auditor, so
+# the vars aren't present anyway — this is a belt-and-suspenders guarantee of
+# the invariant regardless of how audit.sh was launched. (Keep everything
+# else: claude needs USER/LOGNAME/keychain access to stay authenticated —
+# `env -i` breaks its login, which once mis-fired a safety NO-GO.)
+KEYLESS=(env -u PRIVATE_KEY -u BGIPFS_KEY)
+
+# Source the auditor env into THIS shell (subshell callers scope it). Used by
+# key-holding phases only. Never called before/around the audit phase.
+_load_env() { set -a; source "$REPO_ROOT/.env.auditor"; set +a; }
+_rpc() { echo "https://base-mainnet.g.alchemy.com/v2/$ALCHEMY_API_KEY"; }
+
+# On-chain status (0 OPEN 1 IN_PROGRESS 2 COMPLETE 3 CANCELLED), "" on error.
+_onchain_status() {
+  ( _load_env
+    cast call "$CONTRACT" "getJob(uint256)" "$JOB_ID" --rpc-url "$(_rpc)" 2>/dev/null \
+    | python3 -c 'import sys
+raw=sys.stdin.read().strip()
+try: print(int.from_bytes(bytes.fromhex(raw[2:])[7*32:8*32],"big"))
+except Exception: print("")' )
+}
+
+# dry-run guard. Idiom: `_would "…" && return 0`.
+#   PLAN mode (GO=0): print the intent, return 0 → the `&& return 0` fires and
+#                     the phase skips, touching nothing.
+#   RUN  mode (GO=1): return 1 → the `&&` short-circuits, the phase executes.
+
+# ── phase 0: intake ────────────────────────────────────────────────────────
+phase_intake() {
+  _would "fetch job $JOB_ID (get-job + messages) into $JOB_DIR" && return 0
+  [[ -s "$JOB_DIR/job.json" ]] && { echo "intake: job.json present (skip)"; state_mark_done intake; return 0; }
+  ( _load_env
+    "$LC/get-job.sh" "$JOB_ID" > "$JOB_DIR/job.json" 2>/dev/null
+    "$LC/messages.sh" "$JOB_ID" > "$JOB_DIR/messages.json" 2>/dev/null || echo '{"messages":[]}' > "$JOB_DIR/messages.json"
+  )
+  local svc target
+  svc=$(python3 -c 'import json;print(json.load(open("'"$JOB_DIR"'/job.json")).get("serviceTypeId"))' 2>/dev/null)
+  [[ "$svc" == "4" ]] || echo "intake: WARNING serviceTypeId=$svc (expected 4=audit)"
+  # Resolve target: a github repo URL, or an on-chain address+chain. Strip the
+  # known stray leading byte / stray digit that leftclaw descriptions carry.
+  target=$(python3 -c '
+import json,re
+d=json.load(open("'"$JOB_DIR"'/job.json"))
+desc=(d.get("description") or "").strip()
+m=re.search(r"https?://[^\s]+?(?:\.git)?(?=\s|$|/tree|/blob)", desc)
+if m: print("repo\t"+m.group(0)); raise SystemExit
+m=re.search(r"0x[a-fA-F0-9]{40}", desc)
+if m: print("address\t"+m.group(0))
+' 2>/dev/null)
+  state_set "target" "$target"
+  echo "intake: target = ${target:-UNRESOLVED}"
+  [[ -n "$target" ]] || { echo "intake: could not resolve a target from description — parking"; return 3; }
+  state_mark_done intake
+}
+
+# ── phase 1: sanitize (server-side leftclaw gate) ──────────────────────────
+phase_sanitize() {
+  _would "sanitize-check job $JOB_ID (server gate)" && return 0
+  local resp safe pending
+  resp=$( _load_env; "$LC/sanitize-check.sh" "$JOB_ID" 2>/dev/null ) || true
+  safe=$(   printf '%s' "$resp" | python3 -c 'import json,sys
+try:print(json.load(sys.stdin).get("safe"))
+except:print("")' 2>/dev/null)
+  pending=$(printf '%s' "$resp" | python3 -c 'import json,sys
+try:print(json.load(sys.stdin).get("pending"))
+except:print("")' 2>/dev/null)
+  if [[ "$safe" == "True" ]]; then echo "sanitize: safe"; state_mark_done sanitize; return 0
+  elif [[ "$pending" == "True" ]]; then echo "sanitize: still PENDING server-side — park & retry later"; return 3
+  else echo "sanitize: NOT safe — declining"; ( _load_env; "$LC/decline.sh" "$JOB_ID" ) 2>/dev/null; return 1; fi
+}
+
+# ── phase 2: safety (OUR deep nefariousness pre-flight) ────────────────────
+phase_safety() {
+  local kind url
+  kind=$(state_get target | cut -f1); url=$(state_get target | cut -f2)
+  _would "deep safety pass: scan text, clone+recon repo (jailed), judge go/no-go" && return 0
+  safety_scan_text
+  if [[ "$kind" == "repo" ]]; then
+    safety_clone_repo "$url" || return 1
+    safety_recon_repo
+  else
+    echo "safety: address target — recon limited to fetched source (v1)"; mkdir -p "$JOB_DIR/safety"
+    echo "(address target: $url — no repo build surface)" > "$JOB_DIR/safety/repo-signals.txt"
+  fi
+  if safety_judge; then
+    echo "safety: GO"; state_mark_done safety; return 0
+  else
+    echo "safety: NO-GO — parked. Evidence in $JOB_DIR/safety/verdict.json"
+    _notify "🛑 host-auditor job $JOB_ID safety NO-GO — see verdict.json (NOT auto-run)"
+    return 3
+  fi
+}
+
+# ── phase 3: accept (on-chain) ─────────────────────────────────────────────
+phase_accept() {
+  _would "acceptJob($JOB_ID) on-chain (skips if already accepted)" && return 0
+  local st; st=$(_onchain_status)
+  if [[ "$st" == "1" ]]; then echo "accept: already IN_PROGRESS (skip)"; state_mark_done accept; return 0; fi
+  if [[ "$st" == "2" ]]; then echo "accept: already COMPLETE (skip to end)"; state_mark_done accept; return 0; fi
+  ( _load_env; "$LC/accept.sh" "$JOB_ID" ) || { echo "accept: FAILED"; return 1; }
+  state_mark_done accept
+}
+
+# ── phase 4: audit (jailed, keyless; 3 resumable checkpoints) ──────────────
+# Each sub-phase writes its artifact; a present artifact is skipped, which is
+# what lets a multi-hour audit stop and resume. claude runs under the net jail
+# with env -i (no wallet var) and secrets kernel-denied. log-work fires
+# between sub-phases (outside the jail, with the key) for client-visible
+# progress.
+phase_audit() {
+  _would "run two-phase audit (breadth→depth→reconcile) jailed+keyless on the clone" && return 0
+  mkdir -p "$JOB_DIR/audit"
+  local repo="$JOB_DIR/repo"
+  [[ -d "$repo" ]] || { echo "audit: no repo (address-target audits not in v1)"; return 1; }
+
+  _run_audit_phase() {  # <artifact> <phase-label> <instruction>
+    local art="$JOB_DIR/audit/$1" label="$2" instr="$3"
+    if [[ -s "$art" ]] && [[ $(wc -c <"$art") -gt 400 ]]; then echo "audit/$label: artifact present (skip)"; return 0; fi
+    echo "audit/$label: running (no time cap)…"
+    local sys; sys=$(cat "$HERE/audit-host.prompt.md")
+    run_jailed "$JOB_DIR" net -- "${KEYLESS[@]}" \
+      REPO="$repo" SKILLS="$SKILLS" AUDIT_DIR="$JOB_DIR/audit" \
+      "$HOME/.local/bin/claude" -p --dangerously-skip-permissions \
+      --append-system-prompt "$sys" "$instr" >>"$JOB_DIR/audit/$label.log" 2>&1
+    [[ -s "$art" ]] || { echo "audit/$label: artifact NOT produced — see audit/$label.log"; return 1; }
+    echo "audit/$label: done -> $art"
+  }
+
+  _run_audit_phase phase1-report.md phase1 \
+    "PHASE 1 (breadth). Read \$SKILLS/ethskills-audit.md and audit the Solidity under \$REPO (exclude interfaces/lib/mocks/test). Write the phase-1 findings report to \$AUDIT_DIR/phase1-report.md." || return 1
+  ( _load_env; "$LC/log-work.sh" "$JOB_ID" "audit-pass-1-ethskills" "Phase 1 breadth complete" ) 2>/dev/null || true
+
+  _run_audit_phase phase2-report.md phase2 \
+    "PHASE 2 (depth, BLIND — do not read phase1-report.md). Read \$SKILLS/pashov-auditor.md and run the depth methodology on the Solidity under \$REPO. Write findings to \$AUDIT_DIR/phase2-report.md." || return 1
+  ( _load_env; "$LC/log-work.sh" "$JOB_ID" "audit-pass-2-pashov" "Phase 2 depth complete" ) 2>/dev/null || true
+
+  _run_audit_phase unified-report.md reconcile \
+    "RECONCILE. Follow the reconciliation section of \$SKILLS/two-phase-audit.md: merge \$AUDIT_DIR/phase1-report.md and \$AUDIT_DIR/phase2-report.md into one deduplicated, origin-tagged unified report at \$AUDIT_DIR/unified-report.md. Every finding must quote source and give a concrete exploit path; downgrade any High you cannot walk end-to-end." || return 1
+
+  state_mark_done audit
+}
+
+# ── phase 5: report (assemble + pin commit + verify citations) ─────────────
+phase_report() {
+  _would "assemble final report, pin commit, verify citations resolve" && return 0
+  local uni="$JOB_DIR/audit/unified-report.md" final="$JOB_DIR/report/final-report.md"
+  [[ -s "$uni" ]] || { echo "report: no unified-report.md — run audit first"; return 1; }
+  mkdir -p "$JOB_DIR/report"
+  local commit; commit=$(state_get commit)
+  {
+    echo "> Audit target: $(state_get target | cut -f2) @ commit \`${commit}\`"
+    echo "> Produced by the leftclaw host-auditor (read-only static audit)."
+    echo
+    cat "$uni"
+  } > "$final"
+  # Citation gate: every file.sol:N quoted must resolve to a real line. This
+  # is the job-372 defect — sub-agents number chunked views. Report the
+  # resolution rate; fail the gate below a threshold.
+  local rate
+  rate=$(python3 - "$final" "$JOB_DIR/repo" <<'PY'
+import re,sys,os
+final,repo=sys.argv[1],sys.argv[2]
+txt=open(final).read()
+cites=re.findall(r'([A-Za-z0-9_/.-]+\.sol):(\d+)',txt)
+if not cites: print("100 0 0"); sys.exit()
+ok=0
+for f,n in cites:
+    base=os.path.basename(f); n=int(n)
+    hit=None
+    for root,_,files in os.walk(repo):
+        if base in files: hit=os.path.join(root,base); break
+    if hit:
+        try:
+            if 1<=n<=sum(1 for _ in open(hit)): ok+=1
+        except Exception: pass
+print(f"{int(100*ok/len(cites))} {ok} {len(cites)}")
+PY
+)
+  echo "report: citation resolution $rate (pct ok total)"
+  state_set "citation_rate" "$(echo $rate | cut -d' ' -f1)"
+  local pct; pct=$(echo $rate | cut -d' ' -f1)
+  if (( pct < 80 )); then echo "report: citation gate FAILED ($pct% < 80%) — fix citations before completing"; return 1; fi
+  state_mark_done report
+}
+
+# ── phase 6: publish (IPFS) ────────────────────────────────────────────────
+phase_publish() {
+  _would "upload final report to bgipfs and record URL" && return 0
+  local final="$JOB_DIR/report/final-report.md"
+  local url; url=$(state_get result_url)
+  if [[ -n "$url" ]] && curl -fsS -m 10 -o /dev/null "$url" 2>/dev/null; then
+    echo "publish: URL already live (skip): $url"; state_mark_done publish; return 0; fi
+  [[ -s "$final" ]] || { echo "publish: no final report"; return 1; }
+  local out u
+  out=$( _load_env; "$BG/upload.sh" "$final" 2>/dev/null )
+  u=$(printf '%s' "$out" | awk -F'URL: ' '/URL: /{print $2; exit}')
+  [[ "$u" == https://* ]] || { echo "publish: no URL from bgipfs — output was: $out"; return 1; }
+  state_set "result_url" "$u"
+  echo "publish: $u"
+  state_mark_done publish
+}
+
+# ── phase 7: complete (on-chain, gated) ────────────────────────────────────
+phase_complete() {
+  _would "completeJob($JOB_ID) on-chain — gated on safety=go + citations resolved" && return 0
+  local st; st=$(_onchain_status)
+  if [[ "$st" == "2" ]]; then echo "complete: already COMPLETE on-chain (skip)"; state_mark_done complete; return 0; fi
+  # Gate: never complete unless safety=go AND citations resolved.
+  state_is_done safety || { echo "complete: BLOCKED — safety not passed"; return 1; }
+  local pct; pct=$(state_get citation_rate); [[ -z "$pct" ]] && pct=0
+  (( pct >= 80 )) || { echo "complete: BLOCKED — citation rate $pct% < 80%"; return 1; }
+  local url; url=$(state_get result_url)
+  [[ "$url" == https://* ]] || { echo "complete: no published URL"; return 1; }
+  _would "completeJob($JOB_ID, $url) on-chain" && return 0
+  ( _load_env; "$LC/complete.sh" "$JOB_ID" "$url" ) || { echo "complete: FAILED"; return 1; }
+  state_mark_done complete
+  _notify "✅ host-auditor completed job $JOB_ID — $url"
+}
+
+# Telegram best-effort (reuses the wrangler's .env.notify).
+_notify() {
+  [[ -f "$REPO_ROOT/.env.notify" ]] || return 0
+  ( source "$REPO_ROOT/.env.notify"
+    [[ -n "${TELEGRAM_BOT_TOKEN:-}" && -n "${TELEGRAM_CHAT_ID:-}" ]] || exit 0
+    curl -fsS -m 5 -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
+      --data-urlencode "chat_id=${TELEGRAM_CHAT_ID}" --data-urlencode "text=$1" >/dev/null 2>&1 ) || true
+}
