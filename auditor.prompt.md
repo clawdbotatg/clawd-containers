@@ -74,6 +74,8 @@ Read the README files first so you know the available commands.
 
 Walk every exploit path step by step before rating a finding Critical or High. If you cannot construct a concrete exploit, downgrade the severity. Quote the relevant source lines in each finding.
 
+Pin the audit target in the report header: the commit hash for a repo (`git rev-parse HEAD` of your clone), or the contract address + chain for on-chain source. Before finalizing, verify every `file:line` citation resolves — `sed -n '<N>p' <file>` must show the code the finding quotes. Sub-agent outputs often carry line numbers from chunked or flattened views; fix them against the real files, or drop the line number and keep only the quoted snippet. A citation that lands on the wrong code reads as fabrication to the client, whatever the finding's quality.
+
 ## Operating notes
 
 - If a script returns a non-zero exit or unexpected output, capture the stderr in your summary and continue with the next job — don't get stuck.
