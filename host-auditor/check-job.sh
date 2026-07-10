@@ -30,7 +30,12 @@ st=$(printf '%s' "$raw" | python3 -c 'import sys
 try: print(int.from_bytes(bytes.fromhex(sys.stdin.read().strip()[2:])[7*32:8*32],"big"))
 except Exception: print("")' 2>/dev/null)
 resurl=$(printf '%s' "$raw" | python3 -c 'import re,sys
-m=re.search(r"https://[ -~]*?ipfs[ -~]*?/",sys.stdin.read())
+# The resultURL is ABI-encoded bytes in the return blob — decode hex to
+# text before searching, or the literal "https://" never appears.
+raw=sys.stdin.read().strip()
+try: txt=bytes.fromhex(raw[2:]).decode("latin-1")
+except Exception: txt=raw
+m=re.search(r"https://[ -~]*?ipfs[ -~]*?/",txt)
 print(m.group(0) if m else "")' 2>/dev/null)
 case "$st" in
   2) ok "on-chain: COMPLETE" ;;
