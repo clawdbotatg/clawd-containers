@@ -145,16 +145,20 @@ phase_audit() {
     echo "audit/$label: done -> $art"
   }
 
+  # Paths in the instructions are expanded HERE, not left as $VARs for the
+  # agent: a jailed agent whose Bash tool is degraded can't echo env vars,
+  # and one run (job 374 phase2) guessed the wrong job dir from stale
+  # context and skipped itself against another job's artifact.
   _run_audit_phase phase1-report.md phase1 \
-    "PHASE 1 (breadth). Read \$SKILLS/ethskills-audit.md and audit the Solidity under \$REPO (exclude interfaces/lib/mocks/test). Write the phase-1 findings report to \$AUDIT_DIR/phase1-report.md." || return 1
+    "You are auditing leftclaw job #$JOB_ID and nothing else. PHASE 1 (breadth). Read $SKILLS/ethskills-audit.md and audit the Solidity under $repo (exclude interfaces/lib/mocks/test). Write the phase-1 findings report to $JOB_DIR/audit/phase1-report.md." || return 1
   ( _load_env; "$LC/log-work.sh" "$JOB_ID" "audit-pass-1-ethskills" "Phase 1 breadth complete" ) 2>/dev/null || true
 
   _run_audit_phase phase2-report.md phase2 \
-    "PHASE 2 (depth, BLIND — do not read phase1-report.md). Read \$SKILLS/pashov-auditor.md and run the depth methodology on the Solidity under \$REPO. Write findings to \$AUDIT_DIR/phase2-report.md." || return 1
+    "You are auditing leftclaw job #$JOB_ID and nothing else. PHASE 2 (depth, BLIND — do not read phase1-report.md). Read $SKILLS/pashov-auditor.md and run the depth methodology on the Solidity under $repo. Write findings to $JOB_DIR/audit/phase2-report.md." || return 1
   ( _load_env; "$LC/log-work.sh" "$JOB_ID" "audit-pass-2-pashov" "Phase 2 depth complete" ) 2>/dev/null || true
 
   _run_audit_phase unified-report.md reconcile \
-    "RECONCILE. Follow the reconciliation section of \$SKILLS/two-phase-audit.md: merge \$AUDIT_DIR/phase1-report.md and \$AUDIT_DIR/phase2-report.md into one deduplicated, origin-tagged unified report at \$AUDIT_DIR/unified-report.md. Every finding must quote source and give a concrete exploit path; downgrade any High you cannot walk end-to-end." || return 1
+    "You are auditing leftclaw job #$JOB_ID and nothing else. RECONCILE. Follow the reconciliation section of $SKILLS/two-phase-audit.md: merge $JOB_DIR/audit/phase1-report.md and $JOB_DIR/audit/phase2-report.md into one deduplicated, origin-tagged unified report at $JOB_DIR/audit/unified-report.md. Every finding must quote source and give a concrete exploit path; downgrade any High you cannot walk end-to-end." || return 1
 
   state_mark_done audit
 }
@@ -180,18 +184,29 @@ phase_report() {
 import re,sys,os
 final,repo=sys.argv[1],sys.argv[2]
 txt=open(final).read()
-cites=re.findall(r'([A-Za-z0-9_/.-]+\.sol):(\d+)',txt)
+def lines(p):
+    try: return sum(1 for _ in open(p))
+    except Exception: return 0
+# All .sol source files in the clone (skip deps/interfaces/mocks/test dirs).
+sols=[]
+for root,_,files in os.walk(repo):
+    if re.search(r'/(node_modules|lib|out|\.git|mocks?|test|interfaces?)(/|$)',root): continue
+    for f in files:
+        if f.endswith('.sol'): sols.append(os.path.join(root,f))
+cites=[]  # (abs_path, line_no)
+# Form A: File.sol:N — resolve basename anywhere in the clone.
+for f,n in re.findall(r'([A-Za-z0-9_/.-]+\.sol):(\d+)',txt):
+    base=os.path.basename(f)
+    hit=next((p for p in sols if os.path.basename(p)==base),None)
+    if hit: cites.append((hit,int(n)))
+# Form B: bare "line N" / "lines N" — only unambiguous when the audit target
+# is a single .sol file (single-file / inline-source jobs like #374). Without
+# this, such a report cites every finding as "line N" and the gate passes
+# vacuously at 0/0 — the exact drift it exists to catch.
+if len(sols)==1:
+    for n in re.findall(r'\blines?\s+(\d+)',txt): cites.append((sols[0],int(n)))
 if not cites: print("100 0 0"); sys.exit()
-ok=0
-for f,n in cites:
-    base=os.path.basename(f); n=int(n)
-    hit=None
-    for root,_,files in os.walk(repo):
-        if base in files: hit=os.path.join(root,base); break
-    if hit:
-        try:
-            if 1<=n<=sum(1 for _ in open(hit)): ok+=1
-        except Exception: pass
+ok=sum(1 for p,n in cites if 1<=n<=lines(p))
 print(f"{int(100*ok/len(cites))} {ok} {len(cites)}")
 PY
 )
