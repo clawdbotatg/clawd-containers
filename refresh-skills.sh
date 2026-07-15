@@ -21,17 +21,20 @@ else
   git clone --depth=1 https://github.com/austintgriffith/evm-audit-skills.git evm-audit-skills
 fi
 
-# --- pashov solidity-auditor (sparse-checkout — repo has many skills, we want one)
+# --- pashov skills (sparse-checkout — solidity-auditor is wired into the
+# pipeline; x-ray and fizz are vendored for the planned pre-audit-scan and
+# fuzz phases and are inert until an orchestrator references them)
+PASHOV_SKILLS=(solidity-auditor x-ray fizz)
 if [[ -d pashov-skills/.git ]]; then
-  echo "==> updating skills/pashov-skills (sparse: solidity-auditor)"
+  echo "==> updating skills/pashov-skills (sparse: ${PASHOV_SKILLS[*]})"
   git -C pashov-skills fetch --depth=1 origin main
   git -C pashov-skills reset --hard origin/main
 else
-  echo "==> cloning skills/pashov-skills (sparse: solidity-auditor)"
+  echo "==> cloning skills/pashov-skills (sparse: ${PASHOV_SKILLS[*]})"
   rm -rf pashov-skills
   git clone --depth=1 --filter=blob:none --sparse https://github.com/pashov/skills.git pashov-skills
-  git -C pashov-skills sparse-checkout set solidity-auditor
 fi
+git -C pashov-skills sparse-checkout set "${PASHOV_SKILLS[@]}"
 
 # --- top-level pointers (the original SKILL.md files we keep for context)
 echo "==> refreshing top-level SKILL.md pointers"
