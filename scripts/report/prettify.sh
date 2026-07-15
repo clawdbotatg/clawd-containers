@@ -52,7 +52,12 @@ TMP_MD="$(mktemp -t leftclaw-report-XXXXXX).md"
 trap 'rm -f "$TMP_MD"' EXIT
 curl -fsSL -m 60 "$RESULT_URL" -o "$TMP_MD"
 [[ -s "$TMP_MD" ]] || { echo "error: empty report fetched from $RESULT_URL" >&2; exit 1; }
-# Cheap shape check: a markdown report should start with a heading, not HTML/JSON.
+# Shape check: some workers deliver ready-made HTML — never run those through
+# the markdown renderer (and never host third-party HTML verbatim). Exit 3 = skipped.
+if head -c 200 "$TMP_MD" | grep -qiE '<!doctype|<html'; then
+  echo "skip: job $JOB_ID result is already HTML, not markdown ($RESULT_URL)" >&2
+  exit 3
+fi
 head -c1 "$TMP_MD" | grep -q '#' || echo "warn: report does not start with '#' — rendering anyway" >&2
 
 # ---- render ----

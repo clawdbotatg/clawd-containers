@@ -29,13 +29,26 @@ if (!args.job || !args.md || !args.ipfs || !args.out) {
   process.exit(2);
 }
 
-const md = readFileSync(args.md, "utf8");
+let md = readFileSync(args.md, "utf8");
 const template = readFileSync(join(HERE, "template.html"), "utf8");
+
+// Printout cleanup: if the doc opens with plain prose (leaked agent monologue,
+// e.g. job 237) rather than a heading or blockquote preamble, start at the
+// first heading. The canonical IPFS copy is linked and unchanged.
+if (!/^\s*(#|>)/.test(md)) {
+  const i = md.search(/^#{1,2}\s/m);
+  if (i > 0) md = md.slice(i);
+}
 
 // ---------- title: first h1 in the markdown ----------
 const titleMatch = md.match(/^#\s+(.+)$/m);
 let title = titleMatch ? titleMatch[1].trim() : `Audit Report — Job #${args.job}`;
-title = title.replace(/^Security Audit Report\s*[—–-]\s*/i, ""); // masthead already says "audit"
+// Masthead already says "Smart Contract Audit" — strip redundant prefixes/emoji.
+const AUDIT_WORDS = /Security\s+(?:Audit|Review)(?:\s+Report)?|Smart\s+Contract\s+Audit(?:\s+Report)?|Unified\s+(?:Two-Phase\s+)?Security\s+Audit/;
+title = title
+  .replace(/^[\p{Extended_Pictographic}️\s]+/u, "")
+  .replace(new RegExp(`^(?:${AUDIT_WORDS.source})\\s*[—–:-]\\s*`, "i"), "")
+  .replace(new RegExp(`\\s*[—–:-]\\s*(?:${AUDIT_WORDS.source})$`, "i"), "");
 const esc = s => s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
 
 // ---------- severity counts: one per "**Severity**: X" finding line ----------
@@ -44,14 +57,6 @@ const counts = { Critical: 0, High: 0, Medium: 0, Low: 0, Info: 0 };
 for (const m of md.matchAll(/^\*\*Severity\*\*:?\s*(Critical|High|Medium|Low|Informational|Info)\b/gim)) {
   const s = /^info/i.test(m[1]) ? "Info" : m[1][0].toUpperCase() + m[1].slice(1).toLowerCase();
   counts[s]++;
-}
-const totalFindings = Object.values(counts).reduce((a, b) => a + b, 0);
-let sevStrip = "";
-if (totalFindings > 0) {
-  const cards = SEVS.filter(s => counts[s] > 0)
-    .map(s => `<div class="sev-card ${s.toLowerCase()}"><div class="n">${counts[s]}</div><div class="l">${s}</div></div>`)
-    .join("\n      ");
-  sevStrip = `<div class="sev-strip">\n      ${cards}\n    </div>`;
 }
 
 // ---------- markdown -> html ----------
@@ -103,6 +108,23 @@ const pill = s => {
 body = body.replace(/<td>(Critical|High|Medium|Low|Informational|Info)<\/td>/gi, (_, s) => `<td>${pill(s)}</td>`);
 body = body.replace(/(<strong>Severity<\/strong>:?\s*)(Critical|High|Medium|Low|Informational|Info)\b/gi,
   (_, pre, s) => `${pre}${pill(s)}`);
+
+// Severity strip: prefer per-finding "**Severity**:" lines; fall back to
+// counting severity cells in the findings-summary table (some report formats
+// only tabulate severities).
+if (Object.values(counts).every(n => n === 0)) {
+  for (const m of body.matchAll(/<td><span class="pill (critical|high|medium|low|info)">/g)) {
+    counts[m[1] === "info" ? "Info" : m[1][0].toUpperCase() + m[1].slice(1)]++;
+  }
+}
+const totalFindings = Object.values(counts).reduce((a, b) => a + b, 0);
+let sevStrip = "";
+if (totalFindings > 0) {
+  const cards = SEVS.filter(s => counts[s] > 0)
+    .map(s => `<div class="sev-card ${s.toLowerCase()}"><div class="n">${counts[s]}</div><div class="l">${s}</div></div>`)
+    .join("\n      ");
+  sevStrip = `<div class="sev-strip">\n      ${cards}\n    </div>`;
+}
 
 // Wrap tables for horizontal scroll on small screens.
 body = body.replace(/<table>/g, '<div class="table-wrap"><table>').replace(/<\/table>/g, "</table></div>");
