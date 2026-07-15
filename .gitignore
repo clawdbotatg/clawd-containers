@@ -10,3 +10,6 @@
 # would otherwise turn into half-broken submodules).
 /skills/evm-audit-skills/
 /skills/pashov-skills/
+
+# generated pretty reports (published to leftclaw-services, not here)
+scripts/report/out/
