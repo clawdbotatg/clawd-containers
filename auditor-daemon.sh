@@ -43,7 +43,7 @@ case "$cmd" in
   <key>WorkingDirectory</key><string>$HERE</string>
   <key>EnvironmentVariables</key>
   <dict>
-    <key>PATH</key><string>/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+    <key>PATH</key><string>$HOME/.local/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
     <key>HOME</key><string>$HOME</string>
   </dict>
   <key>RunAtLoad</key><true/>

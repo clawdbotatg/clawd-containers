@@ -160,7 +160,13 @@ save_claude_token() {
 #   2. `claude --version` does not reliably rotate the token; a real -p
 #      call does. Only pay that cost when the token is actually near expiry.
 refresh_host_claude_keychain() {
-  command -v claude >/dev/null || return 0
+  # Resolve claude explicitly: under launchd the PATH is minimal and a bare
+  # `command -v claude` fails, which used to silently skip the refresh and
+  # ship an expired token into VMs (the 2026-07-14 crash-loop).
+  local claude_bin
+  claude_bin="$(command -v claude 2>/dev/null || true)"
+  [[ -z "$claude_bin" && -x "$HOME/.local/bin/claude" ]] && claude_bin="$HOME/.local/bin/claude"
+  [[ -n "$claude_bin" ]] || return 0
   local left
   left="$(security find-generic-password -s 'Claude Code-credentials' -w 2>/dev/null \
     | python3 -c 'import json,sys,time
@@ -171,7 +177,7 @@ except Exception:
     pass' 2>/dev/null)"
   # >10 min of headroom: nothing to do.
   [[ -n "$left" ]] && (( left > 600 )) && return 0
-  env -u CLAUDE_CONFIG_DIR claude -p --output-format text \
+  env -u CLAUDE_CONFIG_DIR "$claude_bin" -p --output-format text \
     "reply with the single word OK" >/dev/null 2>&1 || true
 }
 
