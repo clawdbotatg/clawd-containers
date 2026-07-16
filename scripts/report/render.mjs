@@ -54,8 +54,12 @@ const esc = s => s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&
 // ---------- severity counts: one per "**Severity**: X" finding line ----------
 const SEVS = ["Critical", "High", "Medium", "Low", "Info"];
 const counts = { Critical: 0, High: 0, Medium: 0, Low: 0, Info: 0 };
-for (const m of md.matchAll(/^\*\*Severity\*\*:?\s*(Critical|High|Medium|Low|Informational|Info)\b/gim)) {
-  const s = /^info/i.test(m[1]) ? "Info" : m[1][0].toUpperCase() + m[1].slice(1).toLowerCase();
+// Report formats vary: "**Severity**: X", "**Severity:** X" (colon inside the
+// bold), and "**Severity: X**" (value inside the bold, possibly mid-line).
+const SEV_RE = /\*\*Severity:?\*\*:?\s*(Critical|High|Medium|Low|Informational|Info)\b|\*\*Severity:\s*(Critical|High|Medium|Low|Informational|Info)\*\*/gi;
+for (const m of md.matchAll(SEV_RE)) {
+  const raw = m[1] || m[2];
+  const s = /^info/i.test(raw) ? "Info" : raw[0].toUpperCase() + raw.slice(1).toLowerCase();
   counts[s]++;
 }
 
@@ -106,8 +110,10 @@ const pill = s => {
   return `<span class="pill ${k}">${label}</span>`;
 };
 body = body.replace(/<td>(Critical|High|Medium|Low|Informational|Info)<\/td>/gi, (_, s) => `<td>${pill(s)}</td>`);
-body = body.replace(/(<strong>Severity<\/strong>:?\s*)(Critical|High|Medium|Low|Informational|Info)\b/gi,
+body = body.replace(/(<strong>Severity:?<\/strong>:?\s*)(Critical|High|Medium|Low|Informational|Info)\b/gi,
   (_, pre, s) => `${pre}${pill(s)}`);
+body = body.replace(/<strong>Severity:\s*(Critical|High|Medium|Low|Informational|Info)<\/strong>/gi,
+  (_, s) => `<strong>Severity:</strong> ${pill(s)}`);
 
 // Severity strip: prefer per-finding "**Severity**:" lines; fall back to
 // counting severity cells in the findings-summary table (some report formats
