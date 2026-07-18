@@ -26,3 +26,12 @@ sparse clone incl. x-ray + fizz, top-level SKILL.md pointers) with:
 ```bash
 ./refresh-skills.sh
 ```
+
+## Planned: mining real exploits to sharpen the auditor
+
+[`../HACK-REGISTRY-PLAN.md`](../HACK-REGISTRY-PLAN.md) is the spec for turning
+[`sanbir/evm-hack-registry`](https://github.com/sanbir/evm-hack-registry) (~845
+labeled real EVM exploits, taxonomy ~1:1 with our `evm-audit-skills/` categories)
+into **few-shot exemplars per checklist + a recall benchmark** — without adding
+per-audit runtime (distillation is precomputed offline). Not started; execute from
+that doc.
