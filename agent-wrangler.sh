@@ -113,6 +113,17 @@ FAILURES_FILE="$STATE_DIR/failures.txt"
 MAX_CAP_STRIKES="${MAX_CAP_STRIKES:-2}"
 CAP_STRIKES_FILE="$STATE_DIR/cap_strikes.txt"
 
+# Auditor scope gate (pre-flight). A type-4 job whose description holds
+# more than this many distinct 0x-addresses is a whole-protocol audit that
+# can't finish inside TIME_CAP_AUDITOR_SECONDS (job 443: 16 addresses, 10
+# target contracts — capped out mid-audit and burned a strike). Refuse at
+# intake instead: message the client to repost as 1–2-contract jobs, then
+# decline from the host (status is still OPEN pre-accept, so declineJob
+# works). Deliberately generous — context addresses (tokens, deployer,
+# fee recipients) count toward it too, and the time-cap strikes still
+# backstop anything that sneaks under.
+AUDIT_MAX_ADDRS="${AUDIT_MAX_ADDRS:-6}"
+
 # Telegram dedup buffer: hash -> last-sent-timestamp. Prevents duplicate
 # notifications when multiple wranglers run or retries happen rapidly.
 # Stored as "<hash> <timestamp>" lines in a flat file.
@@ -420,6 +431,37 @@ except: print("")' 2>/dev/null)
       defer_job "$jid" 86400
     fi
     return 1
+  fi
+
+  # Auditor-only: scope gate. Count distinct 0x-addresses in the job
+  # description; a pile of them is a whole-protocol ask that will blow the
+  # time cap (see AUDIT_MAX_ADDRS above). Message once, then decline.
+  if [[ "$svc" == "4" ]]; then
+    local naddrs
+    naddrs=$( ( set -a; source "$env" 2>/dev/null; set +a
+                ./scripts/leftclaw/get-job.sh "$jid" 2>/dev/null
+              ) | python3 -c '
+import json,re,sys
+try:
+  desc = json.load(sys.stdin).get("description") or ""
+  print(len({a.lower() for a in re.findall(r"0x[0-9a-fA-F]{40}", desc)}))
+except Exception:
+  pass' 2>/dev/null )
+    if [[ -n "$naddrs" ]] && (( naddrs > AUDIT_MAX_ADDRS )); then
+      if ! clarification_already_posted "$jid"; then
+        if host_post_message "$jid" "$env" \
+             "Hello — this audit request references ${naddrs} contract addresses, which is more than fits in a single job's time budget, so we're declining it. Please repost as separate jobs of one or two target contracts each (a few context addresses alongside are fine) and we'll pick them up automatically."; then
+          mark_clarification_posted "$jid"
+        fi
+      fi
+      if host_decline "$jid" "$env" "over-scope: ${naddrs} addresses > AUDIT_MAX_ADDRS=${AUDIT_MAX_ADDRS}"; then
+        notify "✂️ job ${jid}: over-scope audit (${naddrs} addresses) — asked client to repost as 1–2-contract jobs"
+        defer_job "$jid" 86400
+      else
+        defer_job "$jid" 600
+      fi
+      return 1
+    fi
   fi
 
   # Feature-only: classifier gate.
