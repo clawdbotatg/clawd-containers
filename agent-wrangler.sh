@@ -504,6 +504,38 @@ except: print("")' 2>/dev/null)
     return 1
   fi
 
+  # Audit-only: complexity gate. A whole-protocol submission (job 443: 10
+  # contracts in one job) can never finish well in one pass — and the
+  # contract only refunds via worker declineJob while the job is still
+  # OPEN (acceptJob moves the escrow to treasury irreversibly). So catch
+  # it here, before anything boots or accepts: tell the client how to
+  # resubmit, then decline — the decline itself returns their escrow.
+  # Fail-open: an empty/errored verdict never blocks a job.
+  if [[ "$svc" == "4" ]]; then
+    local cx verdict targets creason
+    cx=$( ( set -a; source "$env" 2>/dev/null; set +a
+            ./scripts/audit/complexity-check.sh "$jid" 2>/dev/null
+          ) || true )
+    verdict=$(printf '%s\n' "$cx" | awk '/^VERDICT: /{print $2; exit}')
+    targets=$(printf '%s\n' "$cx" | awk '/^TARGETS: /{print $2; exit}')
+    creason=$(printf '%s\n' "$cx" | sed -n 's/^REASON: //p' | head -1)
+    if [[ "$verdict" == "too_complex" ]]; then
+      log "  job $jid: too complex (${creason:-${targets} targets}) — refunding via decline"
+      # Message first, decline second: after the decline lands the client
+      # has their refund and this explains what happened + what to do.
+      host_post_message "$jid" "$env" \
+        "Thanks for the submission — but this job is bigger than our audit pipeline handles well in one pass (${targets:-many} contracts detected; we audit at most 2 per job). We're declining it, which automatically refunds your escrow. Please resubmit as smaller jobs of ONE or TWO contracts each — e.g. start with the escrow/vault contracts, then the registries. Smaller scopes get much deeper reports, and each job completes instead of stalling. We'll pick the new jobs up automatically." || true
+      if host_decline "$jid" "$env" "too complex: ${creason:-${targets} contracts in one job} — refunded; asked client to split into 1-2 contract jobs"; then
+        defer_job "$jid" 86400
+      else
+        # decline can fail transiently (RPC) or because someone accepted
+        # in the race window. Short defer, then re-evaluate.
+        defer_job "$jid" 3600
+      fi
+      return 1
+    fi
+  fi
+
   # Feature-only: classifier gate.
   if [[ "$svc" == "10" ]]; then
     local target_out mode reason
