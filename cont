@@ -152,13 +152,19 @@ claude_keychain_service() { claude_keychain_service_for "$(claude_src_dir)"; }
 # host export it pointing at a harness account (2026-07-09 trap).
 claude_ping_dir() {  # $1 = config dir ("" = default)
   local dir="${1%/}"
+  # Resolve claude explicitly: under launchd the PATH is minimal and a bare
+  # `claude` fails, silently skipping the refresh (the 2026-07-14 crash-loop).
+  local claude_bin
+  claude_bin="$(command -v claude 2>/dev/null || true)"
+  [[ -z "$claude_bin" && -x "$HOME/.local/bin/claude" ]] && claude_bin="$HOME/.local/bin/claude"
+  [[ -n "$claude_bin" ]] || return 1
   # </dev/null: claude -p reads stdin — without this it eats the stdin of
   # any while-read loop that calls us (the account roster bug).
   if [[ -z "$dir" ]]; then
-    timeout 60 env -u CLAUDE_CONFIG_DIR claude -p --output-format text \
+    timeout 60 env -u CLAUDE_CONFIG_DIR "$claude_bin" -p --output-format text \
       "reply with the single word OK" </dev/null >/dev/null 2>&1
   else
-    CLAUDE_CONFIG_DIR="$dir" timeout 60 claude -p --output-format text \
+    CLAUDE_CONFIG_DIR="$dir" timeout 60 "$claude_bin" -p --output-format text \
       "reply with the single word OK" </dev/null >/dev/null 2>&1
   fi
 }
@@ -231,7 +237,13 @@ save_claude_token() {
 #   2. `claude --version` does not reliably rotate the token; a real -p
 #      call does. Only pay that cost when the token is actually near expiry.
 refresh_host_claude_keychain() {
-  command -v claude >/dev/null || return 0
+  # Resolve claude explicitly: under launchd the PATH is minimal and a bare
+  # `command -v claude` fails, which used to silently skip the refresh and
+  # ship an expired token into VMs (the 2026-07-14 crash-loop).
+  local claude_bin
+  claude_bin="$(command -v claude 2>/dev/null || true)"
+  [[ -z "$claude_bin" && -x "$HOME/.local/bin/claude" ]] && claude_bin="$HOME/.local/bin/claude"
+  [[ -n "$claude_bin" ]] || return 0
   local left
   left="$(read_claude_blob_for "$(claude_src_dir)" 2>/dev/null \
     | python3 -c 'import json,sys,time

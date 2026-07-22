@@ -63,6 +63,11 @@ sandbox_profile() {
   # claude/node keep state + caches under HOME; allow those specific dirs
   # (they are NOT in the secret set) so the agent can run and authenticate.
   echo "(allow file-write* (subpath \"$HOME_DIR/.claude\"))"
+  # When the invoker runs under a harness account, claude's state lives in
+  # $CLAUDE_CONFIG_DIR instead of ~/.claude; without this the jailed agent's
+  # Bash tool dies on mkdir session-env (EPERM) and the agent flies blind
+  # (job 374 phase2 guessed the wrong job dir because of it).
+  [[ -n "${CLAUDE_CONFIG_DIR:-}" ]] && echo "(allow file-write* (subpath \"$CLAUDE_CONFIG_DIR\"))"
   echo "(allow file-write* (subpath \"$HOME_DIR/.cache\"))"
   echo "(allow file-write* (subpath \"$HOME_DIR/.config/claude\"))"
   echo "(allow file-write* (subpath \"$HOME_DIR/Library/Caches\"))"

@@ -83,6 +83,12 @@ mkdir -p "$STATE_DIR"
 # until the VM's queue empties (or it eventually starts).
 MAX_START_RETRIES="${MAX_START_RETRIES:-3}"
 
+# How long a start-failure back-off holds before we retry anyway. Transient
+# causes (Claude session-limit window, RPC blips) heal on their own, but the
+# queue-empties condition can never fire while a job stays assigned to our
+# wallet — that deadlock kept the auditor dark for 27h on 2026-07-09/10.
+BACKOFF_RESET_SECONDS="${BACKOFF_RESET_SECONDS:-1800}"
+
 # Maximum concurrent tart VMs the host can run. Apple Silicon's
 # Virtualization framework documents a cap of 2 for arm64 macOS guests,
 # but on some hosts the effective cap is 1 (other virtualization tools
@@ -1070,7 +1076,15 @@ while :; do
         fi
         fails=$(kv_get "$vm" "$FAILURES_FILE")
         if (( fails >= MAX_START_RETRIES )); then
-          log "$vm: backing off — ${fails} consecutive start failures (will retry when queue empties)"
+          last_fail=$(kv_get "$vm.lastfail" "$FAILURES_FILE")
+          if (( $(date +%s) - last_fail >= BACKOFF_RESET_SECONDS )); then
+            log "$vm: back-off expired (${BACKOFF_RESET_SECONDS}s since last start failure) — retrying"
+            kv_set "$vm" 0 "$FAILURES_FILE"
+            fails=0
+          fi
+        fi
+        if (( fails >= MAX_START_RETRIES )); then
+          log "$vm: backing off — ${fails} consecutive start failures (retry in ≤${BACKOFF_RESET_SECONDS}s, or when queue empties)"
         else
           # Check VM slot availability BEFORE attempting to boot.
           # Skip the boot when MAX_VMS is hit instead of consuming a retry.
@@ -1089,6 +1103,7 @@ while :; do
           else
             new_fails=$(( fails + 1 ))
             kv_set "$vm" "$new_fails" "$FAILURES_FILE"
+            kv_set "$vm.lastfail" "$(date +%s)" "$FAILURES_FILE"
             log "$vm: start failed (${new_fails}/${MAX_START_RETRIES}); will retry next tick"
             if (( new_fails >= MAX_START_RETRIES )); then
               log "WARNING: $vm hit ${MAX_START_RETRIES} consecutive start failures — backing off until queue empties"

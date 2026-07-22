@@ -66,7 +66,7 @@ mkdir -p "$HOME/skills"
 # Top-level pointer files. two-phase-audit-v2.md is the LIVE orchestrator
 # (adds a context-building Phase 0 in front of breadth+depth); two-phase-audit.md
 # (v1) is kept as the fallback/reference and is still used by host-auditor.
-for s in two-phase-audit-v2.md two-phase-audit.md audit-context.md ethskills-audit.md pashov-auditor.md README.md; do
+for s in two-phase-audit-v3.md two-phase-audit-v2.md two-phase-audit.md audit-context.md ethskills-audit.md pashov-auditor.md README.md; do
   src="/tmp/skills/$s"
   if [[ -f "$src" ]]; then
     install -m 644 "$src" "$HOME/skills/$s"

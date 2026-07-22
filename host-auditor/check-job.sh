@@ -62,17 +62,24 @@ if [[ -s "$final" && -d "$JOB_DIR/repo" ]]; then
   read -r pct okc tot < <(python3 - "$final" "$JOB_DIR/repo" <<'PY'
 import re,sys,os
 txt=open(sys.argv[1]).read(); repo=sys.argv[2]
-cites=re.findall(r'([A-Za-z0-9_/.-]+\.sol):(\d+)',txt)
+def lines(p):
+    try: return sum(1 for _ in open(p))
+    except Exception: return 0
+sols=[]
+for root,_,files in os.walk(repo):
+    if re.search(r'/(node_modules|lib|out|\.git|mocks?|test|interfaces?)(/|$)',root): continue
+    for f in files:
+        if f.endswith('.sol'): sols.append(os.path.join(root,f))
+cites=[]
+for f,n in re.findall(r'([A-Za-z0-9_/.-]+\.sol):(\d+)',txt):
+    base=os.path.basename(f)
+    hit=next((p for p in sols if os.path.basename(p)==base),None)
+    if hit: cites.append((hit,int(n)))
+# bare "line N" is only unambiguous for a single-file target (see phases.sh)
+if len(sols)==1:
+    for n in re.findall(r'\blines?\s+(\d+)',txt): cites.append((sols[0],int(n)))
 if not cites: print("100 0 0"); raise SystemExit
-ok=0
-for f,n in cites:
-    base=os.path.basename(f); n=int(n); hit=None
-    for root,_,files in os.walk(repo):
-        if base in files: hit=os.path.join(root,base); break
-    if hit:
-        try:
-            if 1<=n<=sum(1 for _ in open(hit)): ok+=1
-        except Exception: pass
+ok=sum(1 for p,n in cites if 1<=n<=lines(p))
 print(f"{int(100*ok/len(cites))} {ok} {len(cites)}")
 PY
 )
