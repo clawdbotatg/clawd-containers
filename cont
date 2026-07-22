@@ -31,6 +31,7 @@ SPEC_DIR="$CONFIG_DIR/specs"
 CLAUDE_TOKEN_FILE="$CONFIG_DIR/claude-token"
 CLAUDE_CREDS_FILE="$CONFIG_DIR/claude-credentials.json"
 CLAUDE_ACCOUNT_FILE="$CONFIG_DIR/claude-account.json"
+CLAUDE_SRC_FILE="$CONFIG_DIR/claude-source"
 SSH_USER="admin"
 SSH_PASS="admin"
 
@@ -106,6 +107,77 @@ ensure_sshpass() {
   }
 }
 
+# ── Claude account selection ────────────────────────────────────────────
+# Which Claude Code login the fleet ships into VMs. Default: the host's
+# ~/.claude login (keychain service "Claude Code-credentials"). `cont
+# account <name>` points it at a harness account dir instead
+# (~/.clawd-accounts/<name>, whose CLAUDE_CONFIG_DIR-scoped keychain
+# service is "Claude Code-credentials-<sha256(dir)[:8]>"). Every token
+# read, refresh ping and blob-staging below follows the selection, so the
+# fleet and the harness share ONE credential store per account. Never fork
+# a store (copy a blob under a second service and let both refresh):
+# OAuth refresh rotates the refresh token, and a copy that falls behind
+# the rotation is dead forever (the ef/sub2 403s).
+ACCOUNTS_DIR="$HOME/.clawd-accounts"
+
+claude_src_dir() {  # print selected config dir; empty = default ~/.claude
+  local d=""
+  [[ -f "$CLAUDE_SRC_FILE" ]] && d="$(cat "$CLAUDE_SRC_FILE" 2>/dev/null || true)"
+  printf '%s' "${d%/}"
+}
+
+claude_src_name() {  # human label for the selection
+  local d; d="$(claude_src_dir)"
+  if [[ -z "$d" ]]; then echo "default"
+  elif [[ "$d" == "$ACCOUNTS_DIR"/* ]]; then basename "$d"
+  else echo "$d"; fi
+}
+
+claude_keychain_service_for() {  # $1 = config dir ("" = default)
+  local dir="${1%/}"
+  if [[ -z "$dir" ]]; then printf 'Claude Code-credentials\n'; return 0; fi
+  # Mirror Claude Code's own derivation exactly (see tools/usage_probe.py
+  # in the harness repo): sha256 of the NFC-normalized dir path, first 8 hex.
+  python3 -c 'import hashlib, sys, unicodedata
+print("Claude Code-credentials-"
+      + hashlib.sha256(unicodedata.normalize("NFC", sys.argv[1]).encode()).hexdigest()[:8])' "$dir"
+}
+
+claude_keychain_service() { claude_keychain_service_for "$(claude_src_dir)"; }
+
+# Minimal `claude -p` under a given config dir so Claude Code itself
+# refreshes-and-rewrites that account's keychain entry (never hand-roll the
+# OAuth refresh: discarding the rotated refresh token kills the account).
+# For the default account CLAUDE_CONFIG_DIR must be UNSET — shells on this
+# host export it pointing at a harness account (2026-07-09 trap).
+claude_ping_dir() {  # $1 = config dir ("" = default)
+  local dir="${1%/}"
+  # </dev/null: claude -p reads stdin — without this it eats the stdin of
+  # any while-read loop that calls us (the account roster bug).
+  if [[ -z "$dir" ]]; then
+    timeout 60 env -u CLAUDE_CONFIG_DIR claude -p --output-format text \
+      "reply with the single word OK" </dev/null >/dev/null 2>&1
+  else
+    CLAUDE_CONFIG_DIR="$dir" timeout 60 claude -p --output-format text \
+      "reply with the single word OK" </dev/null >/dev/null 2>&1
+  fi
+}
+
+# Print an account's credential blob JSON ({"claudeAiOauth":{...}}).
+# Keychain first (Claude Code's primary store on macOS), then the
+# .credentials.json file inside the config dir — some logins only have
+# the file. $1 = config dir ("" = default ~/.claude).
+read_claude_blob_for() {
+  local dir="${1%/}" json path
+  if json="$(security find-generic-password -s "$(claude_keychain_service_for "$dir")" -w 2>/dev/null)" \
+     && [[ -n "$json" ]]; then
+    printf '%s' "$json"; return 0
+  fi
+  path="${dir:-$HOME/.claude}/.credentials.json"
+  if [[ -f "$path" ]]; then cat "$path"; return 0; fi
+  return 1
+}
+
 has_valid_claude_token() {
   [[ -f "$CLAUDE_TOKEN_FILE" ]] || return 1
   local t; t="$(tr -d '[:space:]' < "$CLAUDE_TOKEN_FILE" 2>/dev/null)"
@@ -123,12 +195,12 @@ sys.exit(0 if exp and exp/1000 > time.time() else 1)
 PY
 }
 
-# Pull the OAuth token from the host's macOS keychain entry that Claude Code
-# writes ("Claude Code-credentials"). Returns 0 and prints the token on stdout
-# if a well-formed sk-ant-oat-... value is present, else returns 1.
+# Pull the OAuth token from the SELECTED account's keychain entry (see
+# claude_src_dir). Returns 0 and prints the token on stdout if a
+# well-formed sk-ant-oat-... value is present, else returns 1.
 read_claude_token_from_keychain() {
   local json token
-  json="$(security find-generic-password -s 'Claude Code-credentials' -w 2>/dev/null)" || return 1
+  json="$(read_claude_blob_for "$(claude_src_dir)")" || return 1
   [[ -n "$json" ]] || return 1
   token="$(printf '%s' "$json" | python3 -c \
     'import json,sys
@@ -153,16 +225,15 @@ save_claude_token() {
 # tokens expire in ~hours; the refreshToken is long-lived.
 #
 # Two traps (2026-07-09, fleet down 28h on this):
-#   1. The keychain entry we ship belongs to the DEFAULT account (~/.claude).
-#      Shells on this host often export CLAUDE_CONFIG_DIR pointing at a
-#      harness account — a refresh under that env rotates the wrong
-#      credential and leaves the shipped blob stale forever.
+#   1. The refresh must run under the SELECTED account's config dir (unset
+#      for default) — a refresh under the wrong CLAUDE_CONFIG_DIR rotates
+#      the wrong credential and leaves the shipped blob stale forever.
 #   2. `claude --version` does not reliably rotate the token; a real -p
 #      call does. Only pay that cost when the token is actually near expiry.
 refresh_host_claude_keychain() {
   command -v claude >/dev/null || return 0
   local left
-  left="$(security find-generic-password -s 'Claude Code-credentials' -w 2>/dev/null \
+  left="$(read_claude_blob_for "$(claude_src_dir)" 2>/dev/null \
     | python3 -c 'import json,sys,time
 try:
     o=json.load(sys.stdin)["claudeAiOauth"]
@@ -171,8 +242,7 @@ except Exception:
     pass' 2>/dev/null)"
   # >10 min of headroom: nothing to do.
   [[ -n "$left" ]] && (( left > 600 )) && return 0
-  env -u CLAUDE_CONFIG_DIR claude -p --output-format text \
-    "reply with the single word OK" >/dev/null 2>&1 || true
+  claude_ping_dir "$(claude_src_dir)" || true
 }
 
 # Save the full keychain credential blob so the VM can re-create an
@@ -183,7 +253,7 @@ except Exception:
 save_claude_credentials_blob() {
   refresh_host_claude_keychain
   local json
-  json="$(security find-generic-password -s 'Claude Code-credentials' -w 2>/dev/null)" || return 1
+  json="$(read_claude_blob_for "$(claude_src_dir)")" || return 1
   [[ -n "$json" ]] || return 1
   ( umask 077; printf '%s' "$json" > "$CLAUDE_CREDS_FILE" )
   chmod 600 "$CLAUDE_CREDS_FILE"
@@ -196,8 +266,12 @@ save_claude_credentials_blob() {
 # We deliberately copy ONLY auth-state keys: project paths, history,
 # repo paths, and other personal/host-specific state stay on the host.
 save_claude_account_blob() {
-  [[ -f "$HOME/.claude.json" ]] || return 1
-  python3 - "$HOME/.claude.json" "$CLAUDE_ACCOUNT_FILE" <<'PY' || return 1
+  # The selected account's .claude.json lives inside its config dir
+  # (CLAUDE_CONFIG_DIR layout); the default account's at ~/.claude.json.
+  local src="$HOME/.claude.json" dir; dir="$(claude_src_dir)"
+  [[ -n "$dir" ]] && src="$dir/.claude.json"
+  [[ -f "$src" ]] || return 1
+  python3 - "$src" "$CLAUDE_ACCOUNT_FILE" <<'PY' || return 1
 import json, os, sys
 src_path, dst_path = sys.argv[1], sys.argv[2]
 src = json.load(open(src_path))
@@ -311,6 +385,150 @@ cmd_auth() {
     *)
       echo "usage: cont auth [ensure|show|path|clear]" >&2
       exit 2
+      ;;
+  esac
+}
+
+# ── cont account — select which Claude login the fleet ships ────────────
+# Usage headroom for one account. $1 = config dir ("" = default). Prints
+# "<headroom> <resets_at-of-worst-window>". Exit 3 = access token expired
+# (caller may refresh via claude_ping_dir and retry); other nonzero = no
+# usable credential / endpoint failure.
+account_headroom() {
+  local dir="${1%/}" blob
+  blob="$(read_claude_blob_for "$dir")" || return 1
+  [[ -n "$blob" ]] || return 1
+  printf '%s' "$blob" | python3 -c '
+import json, sys, time, urllib.request
+try:
+    o = json.load(sys.stdin)["claudeAiOauth"]
+    tok = o.get("accessToken", "")
+    if not tok or o.get("expiresAt", 0) / 1000 < time.time() + 60:
+        sys.exit(3)  # expired; a claude ping under this dir will rotate it
+    req = urllib.request.Request(
+        "https://api.anthropic.com/api/oauth/usage",
+        headers={"Authorization": "Bearer " + tok,
+                 "anthropic-beta": "oauth-2025-04-20",
+                 "Content-Type": "application/json"})
+    u = json.load(urllib.request.urlopen(req, timeout=10))
+    worst = [0.0, ""]
+    def see(pct, resets):
+        if pct > worst[0]:
+            worst[0], worst[1] = pct, resets or ""
+    for k in ("five_hour", "seven_day", "seven_day_opus", "seven_day_sonnet"):
+        w = u.get(k)
+        if isinstance(w, dict) and isinstance(w.get("utilization"), (int, float)):
+            see(float(w["utilization"]), w.get("resets_at"))
+    # model-scoped caps (e.g. a Fable weekly limit) live only in `limits`
+    for lim in u.get("limits") or []:
+        if isinstance(lim, dict) and isinstance(lim.get("percent"), (int, float)):
+            see(float(lim["percent"]), lim.get("resets_at"))
+    print(f"{100 - worst[0]:.1f} {worst[1]}")
+except SystemExit:
+    raise
+except Exception:
+    sys.exit(1)
+'
+}
+
+account_headroom_fresh() {  # account_headroom + one refresh-and-retry
+  local dir="${1%/}" out rc
+  out="$(account_headroom "$dir")"; rc=$?
+  if (( rc == 3 )); then
+    claude_ping_dir "$dir" || true
+    out="$(account_headroom "$dir")"; rc=$?
+  fi
+  (( rc == 0 )) || return 1
+  printf '%s\n' "$out"
+}
+
+account_roster() {  # candidate config dirs, one per line ("-" = default)
+  echo "-"
+  local d
+  for d in "$ACCOUNTS_DIR"/*/; do
+    [[ -d "$d" ]] || continue
+    echo "${d%/}"
+  done
+}
+
+account_switch() {  # $1 = config dir ("" = default)
+  local dir="${1%/}"
+  if ! read_claude_blob_for "$dir" >/dev/null 2>&1; then
+    echo "error: no credential (keychain or .credentials.json) for '${dir:-default}'" >&2
+    return 1
+  fi
+  ( umask 077; printf '%s' "$dir" > "$CLAUDE_SRC_FILE" )
+  # Drop staged copies of the previous account and restage from the new one.
+  rm -f "$CLAUDE_TOKEN_FILE" "$CLAUDE_CREDS_FILE" "$CLAUDE_ACCOUNT_FILE"
+  local token
+  if token="$(read_claude_token_from_keychain)"; then
+    save_claude_token "$token"
+  fi
+  save_claude_credentials_blob || true
+  save_claude_account_blob || true
+  echo "fleet Claude account -> $(claude_src_name)"
+}
+
+# Switch to the roster account with the most headroom. Prints the new
+# account name and exits 0 ONLY if that changed the selection to an
+# account with >= CONT_MIN_HEADROOM (default 15) headroom; exits 1
+# otherwise — so the wrangler can fall back to pausing.
+account_auto() {
+  local min="${CONT_MIN_HEADROOM:-15}"
+  local cur best_dir="" best_hr="-1" d out hr
+  cur="$(claude_src_dir)"
+  while IFS= read -r d; do
+    [[ "$d" == "-" ]] && d=""
+    out="$(account_headroom_fresh "$d" 2>/dev/null)" || continue
+    hr="${out%% *}"
+    if awk -v a="$hr" -v b="$best_hr" 'BEGIN{exit !(a>b)}'; then
+      best_hr="$hr"; best_dir="$d"
+    fi
+  done < <(account_roster)
+  awk -v h="$best_hr" -v m="$min" 'BEGIN{exit !(h>=m)}' || return 1
+  [[ "$best_dir" == "$cur" ]] && return 1
+  account_switch "$best_dir" >&2 || return 1
+  claude_src_name
+}
+
+cmd_account() {
+  local sub="${1:-show}"
+  case "$sub" in
+    show)
+      local dir; dir="$(claude_src_dir)"
+      echo "account:  $(claude_src_name)"
+      echo "config:   ${dir:-$HOME/.claude (default)}"
+      echo "keychain: $(claude_keychain_service)"
+      ;;
+    dir)     claude_src_dir; echo ;;
+    service) claude_keychain_service ;;
+    blob)    read_claude_blob_for "$(claude_src_dir)" ;;
+    list)
+      local d name cur out mark
+      cur="$(claude_src_dir)"
+      while IFS= read -r d; do
+        [[ "$d" == "-" ]] && d=""
+        if [[ -z "$d" ]]; then name="default"; else name="$(basename "$d")"; fi
+        mark=" "; [[ "$d" == "$cur" ]] && mark="*"
+        if out="$(account_headroom_fresh "$d" 2>/dev/null)"; then
+          printf '%s %-10s headroom %s%%   worst window resets %s\n' \
+            "$mark" "$name" "${out%% *}" "${out#* }"
+        else
+          printf '%s %-10s (no usable credential)\n' "$mark" "$name"
+        fi
+      done < <(account_roster)
+      ;;
+    auto)
+      account_auto
+      ;;
+    default)
+      account_switch ""
+      ;;
+    *)
+      local dir="$sub"
+      [[ "$dir" != /* ]] && dir="$ACCOUNTS_DIR/$sub"
+      [[ -d "$dir" ]] || { echo "error: no such account dir: $dir" >&2; exit 2; }
+      account_switch "$dir"
       ;;
   esac
 }
@@ -649,6 +867,12 @@ cont — programmatic macOS-on-macOS environments via tart
                               ensure (default) runs `claude setup-token` if no
                               valid token saved; the token is auto-injected
                               into VMs by `cont provision`
+  cont account [show|list|auto|default|<name>]
+                              which Claude login the fleet ships into VMs:
+                              a harness account dir (~/.clawd-accounts/<name>)
+                              or `default` (~/.claude). `list` shows usage
+                              headroom per login; `auto` hops to the one with
+                              the most headroom (exit 1 if none >= 15%)
   cont list                   list all VMs and their status
   cont status                 show base + list
   cont up <name>              clone base -> name (if missing) and boot
@@ -675,6 +899,7 @@ main() {
     pull)     cmd_pull "$@" ;;
     base)     cmd_base "$@" ;;
     auth)     cmd_auth "$@" ;;
+    account)  cmd_account "$@" ;;
     list|ls)  cmd_list ;;
     status)   cmd_status ;;
     up|start) cmd_up "$@" ;;

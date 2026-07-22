@@ -229,10 +229,16 @@ except Exception:
 # at/past expiry (where a refresh may have just rotated it).
 HOST_OAUTH_CACHE_SECONDS="${HOST_OAUTH_CACHE_SECONDS:-300}"
 
-# Seconds until the keychain Claude token expires. Prints an integer (may be
-# negative if expired); prints nothing if the entry is missing/unreadable.
+# The Claude login the fleet ships is selected via `cont account` — every
+# host-side health/usage check below must follow the same selection, or the
+# gates watch one account while the VMs burn another.
+fleet_claude_dir() { ./cont account dir 2>/dev/null || true; }
+fleet_claude_blob() { ./cont account blob 2>/dev/null || true; }
+
+# Seconds until the selected account's Claude token expires. Prints an
+# integer (may be negative if expired); nothing if missing/unreadable.
 host_oauth_seconds_left() {
-  security find-generic-password -s 'Claude Code-credentials' -w 2>/dev/null | python3 -c '
+  fleet_claude_blob | python3 -c '
 import json,sys,time
 try:
     o=json.load(sys.stdin)["claudeAiOauth"]
@@ -269,13 +275,19 @@ host_oauth_ok() {
   # just rotated it, so confirm with a live ping (which itself triggers a
   # refresh if needed). Retry to absorb transient slowness — only a genuine,
   # repeated failure here means auth is actually dead and worth alerting on.
-  local out="" attempt
+  local out="" attempt cdir
+  cdir="$(fleet_claude_dir)"
   for attempt in 1 2 3; do
-    # unset INSIDE the login shell: .zprofile exports CLAUDE_CONFIG_DIR
-    # (harness account), but the credential the VMs ship is the DEFAULT
-    # account's keychain entry — pinging the harness account gives a false
-    # "ok" while the fleet's actual token is dead (2026-07-09, 28h outage).
-    out=$(timeout 25 zsh -lc 'unset CLAUDE_CONFIG_DIR; claude -p --output-format text "reply with the single word OK"' 2>&1 || true)
+    # Set/unset INSIDE the login shell: .zprofile exports CLAUDE_CONFIG_DIR
+    # (harness account), which would override anything we export out here —
+    # pinging the wrong account gives a false "ok" while the fleet's actual
+    # token is dead (2026-07-09, 28h outage). The ping must run under the
+    # SELECTED account's config dir (unset = default ~/.claude).
+    if [[ -n "$cdir" ]]; then
+      out=$(timeout 25 zsh -lc "export CLAUDE_CONFIG_DIR=$(printf '%q' "$cdir"); claude -p --output-format text 'reply with the single word OK'" 2>&1 || true)
+    else
+      out=$(timeout 25 zsh -lc 'unset CLAUDE_CONFIG_DIR; claude -p --output-format text "reply with the single word OK"' 2>&1 || true)
+    fi
     case "$out" in
       *OK*) date +%s > "$stamp"; echo "ok" > "$cache"; return 0 ;;
     esac
@@ -337,13 +349,10 @@ host_usage_state() {
     fi
   fi
   local out
-  out=$(python3 -c '
-import json, subprocess, urllib.request
+  out=$(fleet_claude_blob | python3 -c '
+import json, sys, urllib.request
 try:
-    cred = subprocess.run(
-        ["security", "find-generic-password", "-s", "Claude Code-credentials", "-w"],
-        capture_output=True, text=True, timeout=10)
-    tok = json.loads(cred.stdout.strip())["claudeAiOauth"]["accessToken"]
+    tok = json.load(sys.stdin)["claudeAiOauth"]["accessToken"]
     req = urllib.request.Request(
         "https://api.anthropic.com/api/oauth/usage",
         headers={"Authorization": "Bearer " + tok,
@@ -928,8 +937,20 @@ while :; do
   fi
 
   # Usage gate: valid token but exhausted window → every boot would stall
-  # at the no-accept cliff. Wait it out; notify only on state transitions.
+  # at the no-accept cliff. FIRST try hopping to another host login with
+  # headroom (`cont account auto` — new boots ship the new credential;
+  # running VMs finish on the old one). Only if no login has headroom do
+  # we wait it out; notify only on state transitions.
   usage=$(host_usage_state)
+  if [[ "$usage" == exhausted* ]]; then
+    if hopped=$(./cont account auto 2>>"$LOG") && [[ -n "$hopped" ]]; then
+      log "usage window exhausted — auto-hopped fleet account to '$hopped'"
+      notify "🔄 Claude usage limit hit — fleet hopped to account '$hopped'; jobs continue"
+      rm -f "$STATE_DIR/host_usage.state" "$STATE_DIR/host_usage.checked-at" \
+            "$STATE_DIR/host_oauth.status" "$STATE_DIR/host_oauth.checked-at"
+      usage=$(host_usage_state)
+    fi
+  fi
   prev_usage=$(cat "$STATE_DIR/usage.last-state" 2>/dev/null || echo "ok")
   printf '%s\n' "$usage" > "$STATE_DIR/usage.last-state"
   if [[ "$usage" == exhausted* ]]; then

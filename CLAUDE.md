@@ -20,6 +20,9 @@ cont reset <name>            # delete and recreate from base — your "clean sla
 cont snapshot <from> <to>    # APFS clone (cheap); pair with `cont base <to>` for gold images
 cont base [image]            # show or set the image `up`/`reset` clone from
 cont spec <name> cpu=8 memory=16384   # persisted; survives reset (raw `tart set` does not)
+cont account [list|auto|<name>|default]  # which Claude login the fleet ships into VMs
+                                         # (a ~/.clawd-accounts/<name> dir or default ~/.claude);
+                                         # auto = hop to the login with the most usage headroom
 cont down <name>             # stop
 cont rm <name>               # delete
 cont list                    # all VMs + status
@@ -64,6 +67,14 @@ cont reset dev                   # spec re-applied automatically
 - **Wrapper state:** `~/.config/cont/`
   - `base` — current base image for `up`/`reset`
   - `specs/<name>.conf` — per-VM cpu/memory/display/disk; reapplied via `tart set` on stopped VMs
+  - `claude-source` — config dir of the selected Claude login (empty/missing = default
+    `~/.claude`); all token reads/refreshes/staging follow it. The agent-wrangler's usage
+    gate runs `cont account auto` when the current login's window exhausts, hopping the
+    fleet to the login with the most headroom instead of pausing (pause only when no
+    login has ≥15% headroom). Never fork a credential store (copy a blob under a second
+    keychain service and refresh both) — OAuth refresh rotates the refresh token and the
+    stale copy dies. Refresh only via a real `claude -p` ping under that account's
+    `CLAUDE_CONFIG_DIR` (`claude_ping_dir`), never a hand-rolled token call.
 
 ## Why `cont open` exists (Tahoe quirk)
 
