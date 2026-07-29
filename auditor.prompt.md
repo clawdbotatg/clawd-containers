@@ -43,6 +43,10 @@ Read the README files first so you know the available commands.
    - A **contract address** with a chain (e.g., `0x5abed4...8Cb7 on Base`). Pull verified source from a block explorer or Sourcify; if unverified, use bytecode-level analysis as a last resort.
    - A **GitHub repo URL**. `git clone` it into `~/audits/<job_id>/repo/` and audit `*.sol` files there.
 
+   **Honor the description's pin and scope — this is what the client bought:**
+   - If the description pins a **tag or commit** (e.g. `@ tag audit/… (commit abc123…)`), check the clone out at that exact ref (`git fetch --depth 1 origin <tag-or-commit> && git checkout --detach FETCH_HEAD`) before auditing, and report that commit as the pin. Default-branch HEAD is NOT the source of truth when a pin is given — findings and citations against HEAD describe code the client didn't submit.
+   - If the description scopes to **specific files** ("File: …", "audit ONLY …"), audit only those files (read their imports for context, but findings and phase agents target the scoped files). Do not run the full pipeline over the whole repo — that multiplies runtime past the compute budget and dilutes the report the client paid for. Treat scope-scaled model choices accordingly: a 1–3 file scope is "small scope".
+
    Also check for client clarifications:
    ```
    ~/scripts/leftclaw/messages.sh <job_id>

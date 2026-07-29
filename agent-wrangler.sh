@@ -73,7 +73,7 @@ LOG="${LOG:-/tmp/agent-wrangler.log}"
 TIME_CAP_DEFAULT_SECONDS="${TIME_CAP_DEFAULT_SECONDS:-3600}"   # 1h
 TIME_CAP_BUILDER_SECONDS="${TIME_CAP_BUILDER_SECONDS:-7200}"   # 2h
 TIME_CAP_FEATURE_SECONDS="${TIME_CAP_FEATURE_SECONDS:-7200}"   # 2h
-TIME_CAP_AUDITOR_SECONDS="${TIME_CAP_AUDITOR_SECONDS:-7200}"   # 2h — real audits were hitting the 1h cap
+TIME_CAP_AUDITOR_SECONDS="${TIME_CAP_AUDITOR_SECONDS:-14400}"  # 4h — 2h parked in-budget scoped jobs (508/509); VM work restarts from zero on every cap kill, so a too-tight cap loops forever
 
 # Per-VM start-time markers. Used to compute elapsed for the cap.
 STATE_DIR="${TMPDIR:-/tmp}/agent-wrangler"
