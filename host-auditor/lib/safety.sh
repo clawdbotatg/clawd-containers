@@ -40,14 +40,25 @@ print("\n".join(str(m) for m in (msgs or [])))' "$JOB_DIR/messages.json" 2>/dev/
 # and submodules are NOT recursed — a shallow clone just downloads objects,
 # executing nothing. Records the pinned commit for the report gate later.
 safety_clone_repo() {
-  local url="$1" dest="$JOB_DIR/repo"
+  local url="$1" dest="$JOB_DIR/repo" pin
+  pin=$(state_get pin)
   [[ -d "$dest/.git" ]] && { echo "SAFETY clone: already present (skip)"; return 0; }
   run_jailed "$JOB_DIR" net -- env GIT_CONFIG_NOSYSTEM=1 GIT_TERMINAL_PROMPT=0 \
     git -c core.hooksPath=/dev/null clone --depth 1 "$url" "$dest" >/dev/null 2>&1 || {
       echo "SAFETY clone FAILED: $url"; return 1; }
+  # Honor a description-pinned ref (tag or commit): default-branch HEAD is NOT
+  # the source of truth when the client pinned one — auditing HEAD produces a
+  # report whose findings and citations describe code the client didn't buy.
+  if [[ -n "$pin" ]]; then
+    run_jailed "$JOB_DIR" net -- env GIT_CONFIG_NOSYSTEM=1 GIT_TERMINAL_PROMPT=0 \
+      git -C "$dest" -c core.hooksPath=/dev/null fetch --depth 1 origin "$pin" >/dev/null 2>&1 || {
+        echo "SAFETY clone FAILED: pinned ref '$pin' not fetchable from $url"; return 1; }
+    run_jailed "$JOB_DIR" offline -- git -C "$dest" -c core.hooksPath=/dev/null checkout --detach FETCH_HEAD >/dev/null 2>&1 || {
+      echo "SAFETY clone FAILED: could not checkout pinned ref '$pin'"; return 1; }
+  fi
   local commit; commit=$(run_jailed "$JOB_DIR" offline -- git -C "$dest" rev-parse HEAD 2>/dev/null)
   state_set "commit" "$commit"
-  echo "SAFETY clone OK: $url @ ${commit:0:12}"
+  echo "SAFETY clone OK: $url @ ${commit:0:12}${pin:+ (pin: $pin)}"
 }
 
 # ── Layer 1b: static recon over the cloned repo (offline jail) ─────────────
