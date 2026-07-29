@@ -26,7 +26,9 @@ KEYLESS=(env -u PRIVATE_KEY -u BGIPFS_KEY)
 
 # Source the auditor env into THIS shell (subshell callers scope it). Used by
 # key-holding phases only. Never called before/around the audit phase.
-_load_env() { set -a; source "$REPO_ROOT/.env.auditor"; set +a; }
+# AUDITOR_ENV_FILE selects the wallet (default .env.auditor) — must match the
+# job's on-chain worker, e.g. AUDITOR_ENV_FILE=.env.auditor2 for auditor2 jobs.
+_load_env() { set -a; source "$REPO_ROOT/${AUDITOR_ENV_FILE:-.env.auditor}"; set +a; }
 _rpc() { echo "https://base-mainnet.g.alchemy.com/v2/$ALCHEMY_API_KEY"; }
 
 # On-chain status (0 OPEN 1 IN_PROGRESS 2 COMPLETE 3 CANCELLED), "" on error.

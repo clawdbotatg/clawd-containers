@@ -22,6 +22,18 @@ if [[ -r "$LEFTCLAW_AUTH_CACHE" ]]; then
   source "$LEFTCLAW_AUTH_CACHE"
 fi
 
+# The cache holds ONE wallet's sig. With multiple worker wallets on the host
+# (auditor + auditor2), a cached sig for a different address than the current
+# PRIVATE_KEY silently mis-auths (403s / empty message lists) — re-sign instead.
+if [[ -n "${LEFTCLAW_ADDR:-}" ]] && command -v cast >/dev/null 2>&1; then
+  _me="$(cast wallet address "$PRIVATE_KEY" 2>/dev/null | tr '[:upper:]' '[:lower:]')"
+  _cached="$(printf '%s' "$LEFTCLAW_ADDR" | tr '[:upper:]' '[:lower:]')"
+  if [[ -n "$_me" && "$_cached" != "$_me" ]]; then
+    LEFTCLAW_ADDR=""; LEFTCLAW_SIG=""
+  fi
+  unset _me _cached
+fi
+
 if [[ -z "${LEFTCLAW_ADDR:-}" || -z "${LEFTCLAW_SIG:-}" ]]; then
   if ! command -v cast >/dev/null 2>&1; then
     echo "_auth.sh: foundry's cast not on PATH — re-provision the VM" >&2

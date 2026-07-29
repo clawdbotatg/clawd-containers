@@ -18,7 +18,7 @@ JOB_DIR="$HERE/jobs/$JOB_ID"
 CONTRACT="0xb2fb486a9569ad2c97d9c73936b46ef7fdaa413a"
 
 # Independent env load + RPC (does NOT reuse phases.sh helpers).
-set -a; source "$REPO_ROOT/.env.auditor" 2>/dev/null; set +a
+set -a; source "$REPO_ROOT/${AUDITOR_ENV_FILE:-.env.auditor}" 2>/dev/null; set +a
 RPC="https://base-mainnet.g.alchemy.com/v2/${ALCHEMY_API_KEY:-}"
 fail=0
 ok()   { echo "✅ $*"; }
