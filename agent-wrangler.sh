@@ -868,6 +868,21 @@ start_vm() {
     fi
   fi
   mark_started "$vm"
+  # Custody hop: $vm now rides the selected login and will rotate its
+  # refresh token in-guest on any job that outlives the ~1h access token.
+  # Move the host's selection to a different login so no host-side
+  # refresh contends with the in-guest copy (cont account auto skips
+  # in-custody logins; cont down harvests the rotated blob back). If no
+  # other login has headroom the selection stays shared — logged, and
+  # the harvest still recovers the likely rotation.
+  local _hop
+  if _hop=$(./cont account auto 2>>"$LOG") && [[ -n "$_hop" ]]; then
+    log "  custody hop: fleet account -> '$_hop' ($vm keeps the previous login)"
+    rm -f "$STATE_DIR/host_oauth.status" "$STATE_DIR/host_oauth.checked-at" \
+          "$STATE_DIR/host_usage.state" "$STATE_DIR/host_usage.checked-at"
+  else
+    log "  custody hop unavailable — selection stays on the login inside $vm (shared custody, refresh contention possible)"
+  fi
   notify "🟢 ${vm} starting ${desc}"
   # Settle time so claude has Aqua + LaunchAgent + iTerm + scripts up
   # before the next loop iteration sees the queue change.

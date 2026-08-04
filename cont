@@ -32,10 +32,11 @@ CLAUDE_TOKEN_FILE="$CONFIG_DIR/claude-token"
 CLAUDE_CREDS_FILE="$CONFIG_DIR/claude-credentials.json"
 CLAUDE_ACCOUNT_FILE="$CONFIG_DIR/claude-account.json"
 CLAUDE_SRC_FILE="$CONFIG_DIR/claude-source"
+VM_ACCOUNTS_DIR="$CONFIG_DIR/vm-accounts"
 SSH_USER="admin"
 SSH_PASS="admin"
 
-mkdir -p "$CONFIG_DIR" "$SPEC_DIR"
+mkdir -p "$CONFIG_DIR" "$SPEC_DIR" "$VM_ACCOUNTS_DIR"
 
 spec_file() { echo "$SPEC_DIR/$1.conf"; }
 
@@ -259,8 +260,12 @@ try:
     print(int(o.get("expiresAt",0)/1000 - time.time()))
 except Exception:
     pass' 2>/dev/null)"
-  # >10 min of headroom: nothing to do.
-  [[ -n "$left" ]] && (( left > 600 )) && return 0
+  # Plenty of life left: nothing to do. Threshold defaults to 1h — several
+  # orgs now mint ~1h access tokens while VM jobs run up to 4h, so ship
+  # the freshest token we can get (an in-guest refresh mid-job rotates
+  # the refresh token; custody/harvest recovers that, but a fresh token
+  # at boot pushes the first rotation as late as possible).
+  [[ -n "$left" ]] && (( left > ${CONT_REFRESH_MIN_LEFT:-3600} )) && return 0
   claude_ping_dir "$(claude_src_dir)" || true
 }
 
@@ -471,6 +476,152 @@ account_roster() {  # candidate config dirs, one per line ("-" = default)
   done
 }
 
+# ── Credential custody ──────────────────────────────────────────────────
+# A VM that ships with a login's credential blob will REFRESH it in-guest
+# once the access token expires mid-job, and OAuth refresh ROTATES the
+# refresh token — from that moment the host's copy is a stale sibling,
+# the next host-side refresh gets rejected, and claude wipes the blob:
+# the login reads "dead" (that killed the clawd login, 2026-08-04; access
+# tokens on several orgs now live ~1h while jobs run up to 4h, so
+# in-guest rotation is the NORM, not the edge case). Custody closes both
+# directions: cmd_provision records which login each VM shipped with
+# (vm-accounts/<vm>), every host-side refresh path skips a login while a
+# running VM holds it, and cmd_down harvests the VM's (possibly rotated)
+# blob back into the host store before stopping.
+
+_RUNNING_VMS_MEMO="__unset__"
+running_vms() {  # one VM name per line; memoized per cont invocation
+  if [[ "$_RUNNING_VMS_MEMO" == "__unset__" ]]; then
+    _RUNNING_VMS_MEMO="$(tart list 2>/dev/null \
+      | awk '$1=="local" && $NF=="running" {print $2}')"
+  fi
+  [[ -n "$_RUNNING_VMS_MEMO" ]] && printf '%s\n' "$_RUNNING_VMS_MEMO"
+  return 0
+}
+
+custody_release() { rm -f "$VM_ACCOUNTS_DIR/${1:?}"; }
+
+account_in_custody() {  # $1 = config dir ("" = default); 0 iff a RUNNING vm holds it
+  local d="${1%/}" f vm rec
+  for f in "$VM_ACCOUNTS_DIR"/*; do
+    [[ -f "$f" ]] || continue
+    rec="$(cat "$f" 2>/dev/null || true)"
+    [[ "${rec%/}" == "$d" ]] || continue
+    vm="$(basename "$f")"
+    if running_vms | awk -v n="$vm" '$0==n{f=1} END{exit !f}'; then
+      return 0
+    fi
+  done
+  return 1
+}
+
+# Pull a VM's Claude credential blob back into the host store. Call while
+# the VM is still running (cmd_down does). If the in-guest blob is newer
+# (higher expiresAt ⇒ the guest refreshed, i.e. rotated), adopt it:
+# update the host keychain entry in place (-U preserves the ACL claude
+# set on its own item) and mirror to <dir>/.credentials.json, which
+# read_claude_blob_for and claude both fall back to.
+cmd_harvest() {
+  require_name "${1:-}"
+  local name="$1" rec="$VM_ACCOUNTS_DIR/$1"
+  [[ -f "$rec" ]] || { echo "harvest: no custody record for $name"; return 0; }
+  local dir; dir="$(cat "$rec" 2>/dev/null || true)"; dir="${dir%/}"
+  vm_running "$name" || { echo "harvest: $name not running — skipping"; return 0; }
+  ensure_sshpass
+  local ip; ip="$(tart ip "$name" 2>/dev/null || true)"
+  [[ -n "$ip" ]] || { echo "harvest: no ip for $name — skipping"; return 0; }
+  local blob
+  blob="$(sshpass -p "$SSH_PASS" ssh \
+      -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
+      -o LogLevel=ERROR -o ConnectTimeout=8 "$SSH_USER@$ip" \
+      'security unlock-keychain -p admin "$HOME/Library/Keychains/login.keychain-db" 2>/dev/null;
+       security find-generic-password -s "Claude Code-credentials" -w 2>/dev/null \
+         || cat "$HOME/.claude/.credentials.json" 2>/dev/null' \
+      2>/dev/null || true)"
+  if [[ -z "$blob" ]]; then
+    echo "harvest: no credential readable in $name — skipping"; return 0
+  fi
+  local vm_exp host_exp
+  vm_exp="$(printf '%s' "$blob" | python3 -c '
+import json,sys
+try:
+    o=json.load(sys.stdin)["claudeAiOauth"]
+    assert o.get("accessToken") and o.get("refreshToken")
+    print(int(o.get("expiresAt",0)))
+except Exception:
+    pass' 2>/dev/null)"
+  if [[ -z "$vm_exp" ]]; then
+    echo "harvest: $name blob malformed or missing refreshToken — skipping"; return 0
+  fi
+  host_exp="$(read_claude_blob_for "$dir" 2>/dev/null | python3 -c '
+import json,sys
+try:
+    print(int(json.load(sys.stdin)["claudeAiOauth"].get("expiresAt",0)))
+except Exception:
+    print(0)' 2>/dev/null)"
+  host_exp="${host_exp:-0}"
+  if (( vm_exp <= host_exp )); then
+    echo "harvest: $name blob not newer than host (${vm_exp} <= ${host_exp}) — nothing to adopt"
+    return 0
+  fi
+  local svc acct path
+  svc="$(claude_keychain_service_for "$dir")"
+  path="${dir:-$HOME/.claude}/.credentials.json"
+  ( umask 077; printf '%s' "$blob" > "$path" )
+  if security find-generic-password -s "$svc" >/dev/null 2>&1; then
+    acct="$(security find-generic-password -s "$svc" 2>/dev/null \
+      | sed -n 's/^ *"acct"<blob>="\(.*\)"$/\1/p')"
+    if ! security add-generic-password -U -s "$svc" ${acct:+-a "$acct"} -w "$blob" 2>/dev/null; then
+      # In-place update refused (ACL) — clear the stale entry so reads
+      # fall through to the fresh .credentials.json we just wrote.
+      security delete-generic-password -s "$svc" >/dev/null 2>&1 || true
+    fi
+  fi
+  echo "harvest: adopted rotated credential from $name for '$(basename "${dir:-default}")' (exp $vm_exp > $host_exp)"
+}
+
+# Keep every roster login alive and catch dead ones within hours instead
+# of on the day the fleet needs them. For each login not in VM custody,
+# account_headroom_fresh both validates and (when the access token has
+# expired) refreshes via a real claude ping — advancing the refresh-token
+# lineage so idle logins never rot. DEAD → Telegram (creds sourced from
+# .env.notify beside this script), deduped to one alert per login per day.
+account_keepalive() {
+  local d name out dead=0
+  while IFS= read -r d; do
+    [[ "$d" == "-" ]] && d=""
+    if [[ -z "$d" ]]; then name="default"; else name="$(basename "$d")"; fi
+    if account_in_custody "$d"; then
+      echo "SKIP $name — in custody of a running VM"
+      continue
+    fi
+    if out="$(account_headroom_fresh "$d" 2>/dev/null)"; then
+      echo "OK   $name — headroom ${out%% *}%"
+    else
+      echo "DEAD $name — no usable credential (re-login: CLAUDE_CONFIG_DIR=${d:-~/.claude} claude /login)"
+      keepalive_notify "$name"
+      dead=1
+    fi
+  done < <(account_roster)
+  return "$dead"
+}
+
+keepalive_notify() {  # $1 = account name; Telegram, 1 alert/login/day
+  local envf="$SCRIPT_DIR/.env.notify"
+  [[ -f "$envf" ]] || return 0
+  # shellcheck disable=SC1090
+  source "$envf" 2>/dev/null || return 0
+  [[ -n "${TELEGRAM_BOT_TOKEN:-}" && -n "${TELEGRAM_CHAT_ID:-}" ]] || return 0
+  local stamp="$CONFIG_DIR/keepalive-alerted-$1" now last
+  now="$(date +%s)"; last="$(cat "$stamp" 2>/dev/null || echo 0)"
+  (( now - last < 86400 )) && return 0
+  echo "$now" > "$stamp"
+  curl -fsS -m 10 "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
+    -d chat_id="${TELEGRAM_CHAT_ID}" \
+    -d text="🔴 Claude login '$1' is DEAD (refresh failed) — re-login with: CLAUDE_CONFIG_DIR=~/.clawd-accounts/$1 claude /login" \
+    >/dev/null 2>&1 || true
+}
+
 account_switch() {  # $1 = config dir ("" = default)
   local dir="${1%/}"
   if ! read_claude_blob_for "$dir" >/dev/null 2>&1; then
@@ -495,10 +646,17 @@ account_switch() {  # $1 = config dir ("" = default)
 # otherwise — so the wrangler can fall back to pausing.
 account_auto() {
   local min="${CONT_MIN_HEADROOM:-15}"
-  local cur best_dir="" best_hr="-1" d out hr
+  local excl=",${CONT_EXCLUDE_ACCOUNTS:-},"
+  local cur best_dir="" best_hr="-1" d out hr name
   cur="$(claude_src_dir)"
   while IFS= read -r d; do
     [[ "$d" == "-" ]] && d=""
+    if [[ -z "$d" ]]; then name="default"; else name="$(basename "$d")"; fi
+    # Skip logins whose credential a running VM holds (custody — probing
+    # would refresh-race the in-guest copy) and explicit exclusions
+    # (CONT_EXCLUDE_ACCOUNTS=name1,name2).
+    [[ "$excl" == *",$name,"* ]] && continue
+    account_in_custody "$d" && continue
     out="$(account_headroom_fresh "$d" 2>/dev/null)" || continue
     hr="${out%% *}"
     if awk -v a="$hr" -v b="$best_hr" 'BEGIN{exit !(a>b)}'; then
@@ -540,6 +698,9 @@ cmd_account() {
       ;;
     auto)
       account_auto
+      ;;
+    keepalive)
+      account_keepalive
       ;;
     default)
       account_switch ""
@@ -648,12 +809,27 @@ cmd_open() {
 
 cmd_down() {
   require_name "${1:-}"
+  # Harvest the (possibly rotated) Claude credential back before the VM
+  # dies with it — see "Credential custody". Best-effort, never blocks
+  # the stop.
+  if [[ -f "$VM_ACCOUNTS_DIR/$1" ]] && vm_running "$1"; then
+    timeout 45 "$self" harvest "$1" 2>&1 || echo "harvest: failed for $1 (continuing with stop)" >&2
+  fi
   tart stop "$1"
+  # Custody record deliberately survives a stop: the stopped VM still has
+  # the blob on disk and may boot again (the wrangler's post-provision
+  # bounce does exactly that). Only cmd_rm / a re-provision end custody.
 }
 
 cmd_rm() {
   require_name "${1:-}"
-  if vm_running "$1"; then tart stop "$1" || true; fi
+  if vm_running "$1"; then
+    if [[ -f "$VM_ACCOUNTS_DIR/$1" ]]; then
+      timeout 45 "$self" harvest "$1" 2>&1 || true
+    fi
+    tart stop "$1" || true
+  fi
+  custody_release "$1"
   tart delete "$1"
 }
 
@@ -792,6 +968,12 @@ cmd_provision() {
   [[ -f "$CLAUDE_CREDS_FILE" ]]   && cp "$CLAUDE_CREDS_FILE"   "$stage/cont-claude-credentials.json"
   [[ -f "$CLAUDE_ACCOUNT_FILE" ]] && cp "$CLAUDE_ACCOUNT_FILE" "$stage/cont-claude-account.json"
 
+  # Record credential custody: this VM now rides the selected login. All
+  # host-side refresh paths skip it until cmd_down harvests + releases.
+  if [[ -f "$stage/cont-claude-credentials.json" || -f "$stage/cont-claude-token" ]]; then
+    ( umask 077; printf '%s' "$(claude_src_dir)" > "$VM_ACCOUNTS_DIR/$name" )
+  fi
+
   # Ship it — ONE ssh connection, ONE tar stream, with retry
   local _nfiles; _nfiles="$(find "$stage" -type f | wc -l | tr -d ' ')"
   local _ndirs;  _ndirs="$(find "$stage" -type d -mindepth 1 | wc -l | tr -d ' ')"
@@ -887,12 +1069,18 @@ cont — programmatic macOS-on-macOS environments via tart
                               ensure (default) runs `claude setup-token` if no
                               valid token saved; the token is auto-injected
                               into VMs by `cont provision`
-  cont account [show|list|auto|default|<name>]
+  cont account [show|list|auto|keepalive|default|<name>]
                               which Claude login the fleet ships into VMs:
                               a harness account dir (~/.clawd-accounts/<name>)
                               or `default` (~/.claude). `list` shows usage
                               headroom per login; `auto` hops to the one with
-                              the most headroom (exit 1 if none >= 15%)
+                              the most headroom (exit 1 if none >= 15%;
+                              skips logins in VM custody); `keepalive`
+                              refresh-pings every idle login and alerts on
+                              dead ones (run it from cron/launchd)
+  cont harvest <name>         pull the VM's (possibly rotated) Claude
+                              credential back into the host store; runs
+                              automatically inside `cont down`/`cont rm`
   cont list                   list all VMs and their status
   cont status                 show base + list
   cont up <name>              clone base -> name (if missing) and boot
@@ -920,6 +1108,7 @@ main() {
     base)     cmd_base "$@" ;;
     auth)     cmd_auth "$@" ;;
     account)  cmd_account "$@" ;;
+    harvest)  cmd_harvest "$@" ;;
     list|ls)  cmd_list ;;
     status)   cmd_status ;;
     up|start) cmd_up "$@" ;;
