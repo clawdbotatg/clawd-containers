@@ -926,12 +926,26 @@ while :; do
   refresh_skills
 
   # Health gate: if the host can't authenticate to Anthropic, no VM we
-  # boot can either. Skip the whole tick rather than waste boots.
+  # boot can either. But "the host" means the SELECTED login — its refresh
+  # token dying (revoked, rotated elsewhere) says nothing about the other
+  # roster logins, so FIRST hop to one with headroom (`cont account auto`
+  # skips any login whose credential can't produce a live token), exactly
+  # like the usage gate below. Only when every login is dead do we pause.
+  # (2026-08-04: fleet sat STUCK on one dead login for hours while five
+  # healthy logins idled at 54-100% headroom.)
   if ! host_oauth_ok; then
-    log "STUCK: host claude OAuth is dead — fleet paused this tick. Fix with 'claude /login' on the host."
-    notify "🔴 host claude OAuth is dead — fleet paused; run 'claude /login' on host"
-    sleep "$INTERVAL"
-    continue
+    if hopped=$(./cont account auto 2>>"$LOG") && [[ -n "$hopped" ]]; then
+      rm -f "$STATE_DIR/host_oauth.status" "$STATE_DIR/host_oauth.checked-at" \
+            "$STATE_DIR/host_usage.state" "$STATE_DIR/host_usage.checked-at"
+      log "host claude OAuth dead on selected login — auto-hopped fleet account to '$hopped'"
+      notify "🔄 Claude login dead — fleet hopped to account '$hopped'; jobs continue"
+    fi
+    if ! host_oauth_ok; then
+      log "STUCK: host claude OAuth is dead on every roster login — fleet paused this tick. Fix with 'claude /login' on the host."
+      notify "🔴 host claude OAuth dead (no roster login usable) — fleet paused; run 'claude /login' on host"
+      sleep "$INTERVAL"
+      continue
+    fi
   fi
 
   # OBS gate: no boots or stops while a recording/stream is live. Jobs

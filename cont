@@ -145,6 +145,22 @@ print("Claude Code-credentials-"
 
 claude_keychain_service() { claude_keychain_service_for "$(claude_src_dir)"; }
 
+# Resolve the claude binary explicitly: under launchd the PATH is minimal and
+# a bare `claude` fails, silently skipping refreshes (the 2026-07-14
+# crash-loop; again 2026-08-04 when the install moved to /opt/homebrew/bin).
+resolve_claude_bin() {
+  local b
+  b="$(command -v claude 2>/dev/null || true)"
+  if [[ -z "$b" ]]; then
+    for b in /opt/homebrew/bin/claude "$HOME/.local/bin/claude" "$HOME/.claude/local/claude"; do
+      [[ -x "$b" ]] && break
+      b=""
+    done
+  fi
+  [[ -n "$b" ]] || return 1
+  printf '%s\n' "$b"
+}
+
 # Minimal `claude -p` under a given config dir so Claude Code itself
 # refreshes-and-rewrites that account's keychain entry (never hand-roll the
 # OAuth refresh: discarding the rotated refresh token kills the account).
@@ -152,12 +168,8 @@ claude_keychain_service() { claude_keychain_service_for "$(claude_src_dir)"; }
 # host export it pointing at a harness account (2026-07-09 trap).
 claude_ping_dir() {  # $1 = config dir ("" = default)
   local dir="${1%/}"
-  # Resolve claude explicitly: under launchd the PATH is minimal and a bare
-  # `claude` fails, silently skipping the refresh (the 2026-07-14 crash-loop).
   local claude_bin
-  claude_bin="$(command -v claude 2>/dev/null || true)"
-  [[ -z "$claude_bin" && -x "$HOME/.local/bin/claude" ]] && claude_bin="$HOME/.local/bin/claude"
-  [[ -n "$claude_bin" ]] || return 1
+  claude_bin="$(resolve_claude_bin)" || return 1
   # </dev/null: claude -p reads stdin — without this it eats the stdin of
   # any while-read loop that calls us (the account roster bug).
   if [[ -z "$dir" ]]; then
@@ -237,13 +249,8 @@ save_claude_token() {
 #   2. `claude --version` does not reliably rotate the token; a real -p
 #      call does. Only pay that cost when the token is actually near expiry.
 refresh_host_claude_keychain() {
-  # Resolve claude explicitly: under launchd the PATH is minimal and a bare
-  # `command -v claude` fails, which used to silently skip the refresh and
-  # ship an expired token into VMs (the 2026-07-14 crash-loop).
   local claude_bin
-  claude_bin="$(command -v claude 2>/dev/null || true)"
-  [[ -z "$claude_bin" && -x "$HOME/.local/bin/claude" ]] && claude_bin="$HOME/.local/bin/claude"
-  [[ -n "$claude_bin" ]] || return 0
+  claude_bin="$(resolve_claude_bin)" || return 0
   local left
   left="$(read_claude_blob_for "$(claude_src_dir)" 2>/dev/null \
     | python3 -c 'import json,sys,time
@@ -359,13 +366,14 @@ cmd_auth() {
         [[ -f "$CLAUDE_CREDS_FILE" ]] && echo "saved full keychain blob -> $CLAUDE_CREDS_FILE"
         return 0
       fi
-      command -v claude >/dev/null || {
+      local claude_bin
+      claude_bin="$(resolve_claude_bin)" || {
         echo "error: 'claude' CLI not found on host — install Claude Code first" >&2
         echo "  curl -fsSL https://claude.ai/install.sh | bash" >&2
         exit 2
       }
       echo "==> running 'claude setup-token' — follow the browser flow"
-      claude setup-token
+      "$claude_bin" setup-token
       local rc=$?
       if (( rc != 0 )); then
         echo "error: 'claude setup-token' exited $rc" >&2
