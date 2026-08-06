@@ -75,6 +75,22 @@ TIME_CAP_BUILDER_SECONDS="${TIME_CAP_BUILDER_SECONDS:-7200}"   # 2h
 TIME_CAP_FEATURE_SECONDS="${TIME_CAP_FEATURE_SECONDS:-7200}"   # 2h
 TIME_CAP_AUDITOR_SECONDS="${TIME_CAP_AUDITOR_SECONDS:-14400}"  # 4h — 2h parked in-budget scoped jobs (508/509); VM work restarts from zero on every cap kill, so a too-tight cap loops forever
 
+# Stall detection. A VM holding an assigned job used to be left alone for the
+# FULL time cap — agent_alive is only consulted on the mine=0 path, so a hung
+# or dead agent burned 4h before anything noticed (job 570, 2026-08-05: 4h
+# elapsed, zero logWork calls, then a cap strike). On-chain stage notes are the
+# progress signal, and they survive a VM wipe.
+#
+# Two tiers, because the first stage legitimately takes a long time: the agent
+# boots, reads its prompt and skills, clones, and runs an entire breadth pass
+# before the first logWork lands. Measured on job 570: first stage at 41 min.
+# FIRST_STAGE_GRACE must clear that comfortably or we recycle healthy work.
+STALL_FIRST_STAGE_SECONDS="${STALL_FIRST_STAGE_SECONDS:-5400}"  # 90 min to post ANY stage
+STALL_SECONDS="${STALL_SECONDS:-2700}"                          # 45 min between stages after that
+# Bound the recycles so an un-auditable job can't loop; after this many we stop
+# intervening and let the existing time-cap / strike / park path take over.
+STALL_MAX_RECYCLES="${STALL_MAX_RECYCLES:-2}"
+
 # Per-VM start-time markers. Used to compute elapsed for the cap.
 STATE_DIR="${TMPDIR:-/tmp}/agent-wrangler"
 mkdir -p "$STATE_DIR"
@@ -117,6 +133,7 @@ CAP_STRIKES_FILE="$STATE_DIR/cap_strikes.txt"
 # notifications when multiple wranglers run or retries happen rapidly.
 # Stored as "<hash> <timestamp>" lines in a flat file.
 NOTIFY_DEDUP_FILE="$STATE_DIR/notify_dedup.txt"
+STALL_RECYCLES_FILE="$STATE_DIR/stall_recycles.txt"
 
 # Read a numeric value keyed by $1 from flat file $2. Echoes 0 if missing.
 kv_get() {
@@ -215,6 +232,22 @@ try:
     print(desc)
   else:
     print(f"{desc} ({price})")
+except Exception:
+  pass' 2>/dev/null
+}
+
+# Signature of a job's on-chain progress (its logWork stage notes). Changes
+# whenever the agent records a new stage; empty when none posted yet. Reads the
+# chain rather than ssh-ing the guest: it survives a recycle, needs no network
+# path into the VM, and is the same evidence a human would check.
+get_job_progress_sig() {
+  local jid="$1" env="$2"
+  ( set -a; source "$env" 2>/dev/null; set +a
+    ./scripts/leftclaw/get-job.sh "$jid" 2>/dev/null
+  ) | python3 -c 'import json,sys
+try:
+  d = json.loads(sys.stdin.read(), strict=False)
+  print("|".join(d.get("_other_strings") or []))
 except Exception:
   pass' 2>/dev/null
 }
@@ -1104,7 +1137,41 @@ while :; do
           stop_vm "$vm" "stuck — no job accept within grace window (open=$open, elapsed=${elapsed}s)"
         fi
       else
-        log "$vm up, mine=$mine open=$open — leaving alone (elapsed ${elapsed}s/${cap}s)"
+        # Holding an assigned job: watch on-chain stage progress so a hung or
+        # dead agent is recycled in minutes rather than burning the whole cap.
+        # Before the first stage the budget is STALL_FIRST_STAGE_SECONDS (the
+        # breadth pass is genuinely slow); after it, STALL_SECONDS per stage.
+        jid=$(get_assigned_job_id "$svc" "$env")
+        stalled=0
+        if [[ -n "$jid" ]]; then
+          sig=$(get_job_progress_sig "$jid" "$env")
+          sigf="$STATE_DIR/$vm.progress-sig"
+          stampf="$STATE_DIR/$vm.progress-at"
+          prev=$(cat "$sigf" 2>/dev/null || echo "__unset__")
+          if [[ "$sig" != "$prev" ]]; then
+            printf '%s' "$sig" > "$sigf"; date +%s > "$stampf"
+          else
+            budget="$STALL_SECONDS"
+            [[ -z "$sig" ]] && budget="$STALL_FIRST_STAGE_SECONDS"
+            since=$(cat "$stampf" 2>/dev/null || echo 0)
+            (( since == 0 )) && { date +%s > "$stampf"; since=$(date +%s); }
+            quiet=$(( $(date +%s) - since ))
+            if (( quiet > budget )); then
+              recycles=$(kv_get "$jid" "$STALL_RECYCLES_FILE")
+              if (( recycles < STALL_MAX_RECYCLES )); then
+                kv_set "$jid" $(( recycles + 1 )) "$STALL_RECYCLES_FILE"
+                rm -f "$sigf" "$stampf"
+                stalled=1
+                log "  job $jid: no stage progress for ${quiet}s (budget ${budget}s) — stall recycle $(( recycles + 1 ))/${STALL_MAX_RECYCLES}"
+                notify "⚠️ job ${jid} (${vm}) stalled ${quiet}s with no on-chain progress — recycling ($(( recycles + 1 ))/${STALL_MAX_RECYCLES})"
+                stop_vm "$vm" "STALLED — no stage note for ${quiet}s while holding job ${jid}"
+              else
+                log "  job $jid: stalled again at STALL_MAX_RECYCLES — deferring to the time cap"
+              fi
+            fi
+          fi
+        fi
+        (( stalled )) || log "$vm up, mine=$mine open=$open — leaving alone (elapsed ${elapsed}s/${cap}s)"
       fi
     else
       if [[ "$mine" =~ ^[1-9] || "$open" =~ ^[1-9] ]]; then
