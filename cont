@@ -13,6 +13,23 @@
 
 set -euo pipefail
 
+# macOS ships no `timeout` (it's GNU coreutils). cmd_down guards the
+# credential harvest with `timeout 45` — without a shim that call is
+# "command not found" on every stop, so the rotated Claude credential is
+# never harvested back out of the VM and the login dies with it. Same
+# shim agent-wrangler.sh carries, for the same reason.
+if ! command -v timeout >/dev/null 2>&1; then
+  timeout() {
+    python3 - "$@" <<'PY'
+import subprocess, sys
+try:
+    sys.exit(subprocess.run(sys.argv[2:], timeout=float(sys.argv[1])).returncode)
+except subprocess.TimeoutExpired:
+    sys.exit(124)
+PY
+  }
+fi
+
 # Resolve the directory this script lives in, following symlinks (so
 # `./cont` and the /usr/local/bin/cont symlink both find provision.sh).
 self="${BASH_SOURCE[0]}"

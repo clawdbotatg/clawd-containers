@@ -54,13 +54,36 @@ const esc = s => s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&
 // ---------- severity counts: one per "**Severity**: X" finding line ----------
 const SEVS = ["Critical", "High", "Medium", "Low", "Info"];
 const counts = { Critical: 0, High: 0, Medium: 0, Low: 0, Info: 0 };
-// Report formats vary: "**Severity**: X", "**Severity:** X" (colon inside the
-// bold), and "**Severity: X**" (value inside the bold, possibly mid-line).
-const SEV_RE = /\*\*Severity:?\*\*:?\s*(Critical|High|Medium|Low|Informational|Info)\b|\*\*Severity:\s*(Critical|High|Medium|Low|Informational|Info)\*\*/gi;
-for (const m of md.matchAll(SEV_RE)) {
-  const raw = m[1] || m[2];
-  const s = /^info/i.test(raw) ? "Info" : raw[0].toUpperCase() + raw.slice(1).toLowerCase();
-  counts[s]++;
+const norm = raw => (/^info/i.test(raw) ? "Info" : raw[0].toUpperCase() + raw.slice(1).toLowerCase());
+
+// Preferred signal: the report's own tally line, e.g.
+//   **Severity counts:** 1 Critical · 3 High · 11 Medium · 14 Low · 12 Informational · 9 Leads.
+// It is authoritative and immune to the per-finding prose drift below. Any
+// trailing non-severity bucket ("9 Leads") simply doesn't match.
+const tally = md.match(/\*\*Severity counts:?\*\*:?\s*([^\n]+)/i);
+if (tally) {
+  for (const m of tally[1].matchAll(/(\d+)\s*(Critical|High|Medium|Low|Informational|Info)\b/gi)) {
+    counts[norm(m[2])] += Number(m[1]);
+  }
+}
+
+// Per-finding lines. Formats vary: "**Severity**: X", "**Severity:** X" (colon
+// inside the bold), "**Severity: X**" (value inside the bold), and
+// "**Severity.** X rather than Y" (period, value outside the bold — job 568),
+// and "Severity: **X**" (plain label, bolded value — job 565's inline
+// "Confidence: 70 · Severity: **Medium**" metadata run).
+const SEV_RE = /\*\*Severity[:.]?\*\*[:.]?\s*(Critical|High|Medium|Low|Informational|Info)\b|\*\*Severity:\s*(Critical|High|Medium|Low|Informational|Info)\*\*|(?:^|[^*])Severity:\s*\*\*(Critical|High|Medium|Low|Informational|Info)\*\*/gi;
+if (Object.values(counts).every(n => n === 0)) {
+  for (const m of md.matchAll(SEV_RE)) counts[norm(m[1] || m[2] || m[3])]++;
+}
+
+// Structural fallback: findings whose heading tags severity in the id, e.g.
+// "### [C-1] …", "### [H-2] …". More reliable than prose when a report writes
+// "**Severity rationale.** Rated High rather than Critical" (which names two
+// severities and belongs to neither counter above).
+if (Object.values(counts).every(n => n === 0)) {
+  const BY_ID = { C: "Critical", H: "High", M: "Medium", L: "Low", I: "Info" };
+  for (const m of md.matchAll(/^#{2,4}\s*\[([CHMLI])-\d+\]/gm)) counts[BY_ID[m[1]]]++;
 }
 
 // ---------- markdown -> html ----------
@@ -110,10 +133,13 @@ const pill = s => {
   return `<span class="pill ${k}">${label}</span>`;
 };
 body = body.replace(/<td>(Critical|High|Medium|Low|Informational|Info)<\/td>/gi, (_, s) => `<td>${pill(s)}</td>`);
-body = body.replace(/(<strong>Severity:?<\/strong>:?\s*)(Critical|High|Medium|Low|Informational|Info)\b/gi,
+body = body.replace(/(<strong>Severity[:.]?<\/strong>[:.]?\s*)(Critical|High|Medium|Low|Informational|Info)\b/gi,
   (_, pre, s) => `${pre}${pill(s)}`);
 body = body.replace(/<strong>Severity:\s*(Critical|High|Medium|Low|Informational|Info)<\/strong>/gi,
   (_, s) => `<strong>Severity:</strong> ${pill(s)}`);
+// "Severity: <strong>X</strong>" — plain label, bolded value (job 565).
+body = body.replace(/(^|[^>])(Severity:\s*)<strong>(Critical|High|Medium|Low|Informational|Info)<\/strong>/gi,
+  (_, pre, lbl, s) => `${pre}${lbl}${pill(s)}`);
 
 // Severity strip: prefer per-finding "**Severity**:" lines; fall back to
 // counting severity cells in the findings-summary table (some report formats
