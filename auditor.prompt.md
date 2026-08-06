@@ -78,6 +78,14 @@ Read the README files first so you know the available commands.
 
 Walk every exploit path step by step before rating a finding Critical or High. If you cannot construct a concrete exploit, downgrade the severity. Quote the relevant source lines in each finding.
 
+**Every finding carries an explicit severity, and the report carries a tally.** State it as its own field on each finding — `**Severity:** Critical | High | Medium | Low | Informational` — and put one summary line in the report before the findings:
+
+```
+**Severity counts:** 1 Critical · 3 High · 11 Medium · 14 Low · 12 Informational
+```
+
+Severity is not the same thing as confidence. A `[70]` confidence marker says how sure you are the bug is real; it says nothing about what it costs the client if it is. Reports that ship confidence scores alone leave the client to triage severity themselves, which is the job they paid for. The tally line is also what the published report renderer reads to build its severity strip, so a report without it renders as though it found nothing.
+
 Pin the audit target in the report header: the commit hash for a repo (`git rev-parse HEAD` of your clone), or the contract address + chain for on-chain source. Before finalizing, verify every `file:line` citation resolves — `sed -n '<N>p' <file>` must show the code the finding quotes. Sub-agent outputs often carry line numbers from chunked or flattened views; fix them against the real files, or drop the line number and keep only the quoted snippet. A citation that lands on the wrong code reads as fabrication to the client, whatever the finding's quality.
 
 ## Operating notes
