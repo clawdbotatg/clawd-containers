@@ -60,9 +60,11 @@ const norm = raw => (/^info/i.test(raw) ? "Info" : raw[0].toUpperCase() + raw.sl
 //   **Severity counts:** 1 Critical · 3 High · 11 Medium · 14 Low · 12 Informational · 9 Leads.
 // It is authoritative and immune to the per-finding prose drift below. Any
 // trailing non-severity bucket ("9 Leads") simply doesn't match.
-const tally = md.match(/\*\*Severity counts:?\*\*:?\s*([^\n]+)/i);
+// "counts" (container auditor) and "tally" (host auditor) both occur, and the
+// colon sits inside or outside the bold depending on the writer.
+const tally = md.match(/\*\*Severity (?:counts|tally)\b:?\*\*:?\s*([^\n]+)|\*\*Severity (?:counts|tally)\b:?\s*([^*\n]+)\*\*/i);
 if (tally) {
-  for (const m of tally[1].matchAll(/(\d+)\s*(Critical|High|Medium|Low|Informational|Info)\b/gi)) {
+  for (const m of (tally[1] || tally[2] || "").matchAll(/(\d+)\s*(Critical|High|Medium|Low|Informational|Info)\b/gi)) {
     counts[norm(m[2])] += Number(m[1]);
   }
 }
