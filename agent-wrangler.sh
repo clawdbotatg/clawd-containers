@@ -1035,6 +1035,14 @@ while :; do
       # marker won't exist — assume "now" so we don't immediately
       # time-cap a fresh runtime.
       [[ -f "$STATE_DIR/$vm.started" ]] || mark_started "$vm"
+      # Periodic custody harvest (no-op without a custody record): the
+      # guest rotates its login's refresh token whenever the ~1h access
+      # token expires mid-job, and auditor VMs self-halt at end of job —
+      # so a stop-time harvest alone can miss the rotation and strand the
+      # lineage tip on the VM disk (what killed ef and sub2, 2026-08-06).
+      # Grabbing every tick keeps the host copy current no matter how the
+      # VM later dies.
+      ./cont harvest "$vm" >>"$LOG" 2>&1 || true
       cap=$(cap_for "$vm")
       elapsed=$(elapsed_seconds "$vm")
       if (( elapsed > cap )); then

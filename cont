@@ -532,33 +532,40 @@ account_in_custody() {  # $1 = config dir ("" = default); 0 iff a RUNNING vm hol
   return 1
 }
 
+custody_vm_for() {  # $1 = config dir; prints the VM name(s) holding a custody record for it
+  local d="${1%/}" f rec
+  for f in "$VM_ACCOUNTS_DIR"/*; do
+    [[ -f "$f" ]] || continue
+    rec="$(cat "$f" 2>/dev/null || true)"
+    [[ "${rec%/}" == "$d" ]] && basename "$f"
+  done
+  return 0
+}
+
 # Pull a VM's Claude credential blob back into the host store. Call while
 # the VM is still running (cmd_down does). If the in-guest blob is newer
 # (higher expiresAt ⇒ the guest refreshed, i.e. rotated), adopt it:
 # update the host keychain entry in place (-U preserves the ACL claude
 # set on its own item) and mirror to <dir>/.credentials.json, which
 # read_claude_blob_for and claude both fall back to.
-cmd_harvest() {
-  require_name "${1:-}"
-  local name="$1" rec="$VM_ACCOUNTS_DIR/$1"
-  [[ -f "$rec" ]] || { echo "harvest: no custody record for $name"; return 0; }
-  local dir; dir="$(cat "$rec" 2>/dev/null || true)"; dir="${dir%/}"
-  vm_running "$name" || { echo "harvest: $name not running — skipping"; return 0; }
-  ensure_sshpass
-  local ip; ip="$(tart ip "$name" 2>/dev/null || true)"
-  [[ -n "$ip" ]] || { echo "harvest: no ip for $name — skipping"; return 0; }
-  local blob
-  blob="$(sshpass -p "$SSH_PASS" ssh \
+grab_vm_blob() {  # $1 = vm name; prints the guest's credential blob (or nothing)
+  local ip; ip="$(tart ip "$1" 2>/dev/null || true)"
+  [[ -n "$ip" ]] || return 1
+  sshpass -p "$SSH_PASS" ssh \
       -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
       -o LogLevel=ERROR -o ConnectTimeout=8 "$SSH_USER@$ip" \
       'security unlock-keychain -p admin "$HOME/Library/Keychains/login.keychain-db" 2>/dev/null;
        security find-generic-password -s "Claude Code-credentials" -w 2>/dev/null \
          || cat "$HOME/.claude/.credentials.json" 2>/dev/null' \
-      2>/dev/null || true)"
-  if [[ -z "$blob" ]]; then
-    echo "harvest: no credential readable in $name — skipping"; return 0
-  fi
-  local vm_exp host_exp
+      2>/dev/null
+}
+
+# Adopt a guest blob into the host store for a config dir, iff it is newer
+# (higher expiresAt ⇒ the guest refreshed, i.e. rotated the lineage tip).
+# $1 = config dir ("" = default), $2 = blob JSON, $3 = label for messages.
+# Returns 0 adopted / 0 not-newer (both fine) / 1 malformed blob.
+adopt_blob_for() {
+  local dir="${1%/}" blob="$2" label="${3:-vm}" vm_exp host_exp
   vm_exp="$(printf '%s' "$blob" | python3 -c '
 import json,sys
 try:
@@ -568,7 +575,7 @@ try:
 except Exception:
     pass' 2>/dev/null)"
   if [[ -z "$vm_exp" ]]; then
-    echo "harvest: $name blob malformed or missing refreshToken — skipping"; return 0
+    echo "harvest: $label blob malformed or missing refreshToken — skipping"; return 1
   fi
   host_exp="$(read_claude_blob_for "$dir" 2>/dev/null | python3 -c '
 import json,sys
@@ -578,7 +585,7 @@ except Exception:
     print(0)' 2>/dev/null)"
   host_exp="${host_exp:-0}"
   if (( vm_exp <= host_exp )); then
-    echo "harvest: $name blob not newer than host (${vm_exp} <= ${host_exp}) — nothing to adopt"
+    echo "harvest: $label blob not newer than host (${vm_exp} <= ${host_exp}) — nothing to adopt"
     return 0
   fi
   local svc acct path
@@ -594,7 +601,59 @@ except Exception:
       security delete-generic-password -s "$svc" >/dev/null 2>&1 || true
     fi
   fi
-  echo "harvest: adopted rotated credential from $name for '$(basename "${dir:-default}")' (exp $vm_exp > $host_exp)"
+  echo "harvest: adopted rotated credential from $label for '$(basename "${dir:-default}")' (exp $vm_exp > $host_exp)"
+}
+
+cmd_harvest() {
+  require_name "${1:-}"
+  local name="$1" rec="$VM_ACCOUNTS_DIR/$1"
+  [[ -f "$rec" ]] || { echo "harvest: no custody record for $name"; return 0; }
+  local dir; dir="$(cat "$rec" 2>/dev/null || true)"; dir="${dir%/}"
+  vm_running "$name" || { echo "harvest: $name not running — skipping"; return 0; }
+  ensure_sshpass
+  local blob
+  blob="$(grab_vm_blob "$name" || true)"
+  if [[ -z "$blob" ]]; then
+    echo "harvest: no credential readable in $name — skipping"; return 0
+  fi
+  adopt_blob_for "$dir" "$blob" "$name" || true
+}
+
+# Recover a login stranded inside a STOPPED custody VM (the guest rotated
+# the refresh token mid-job and then halted itself — the wrangler's idle
+# stop and the auditor agents' end-of-job self-shutdown both do this — so
+# cmd_down's harvest never ran). Boot the VM just long enough to grab the
+# blob, stop it IMMEDIATELY (so the guest can't rotate past our copy),
+# adopt, and release custody. Returns 0 iff the login is safe to refresh
+# host-side afterwards. Never boots past the 2-VM system cap.
+reclaim_vm() {
+  local name="$1" rec="$VM_ACCOUNTS_DIR/$1"
+  [[ -f "$rec" ]] || return 0
+  if ! vm_exists "$name"; then custody_release "$name"; return 0; fi
+  if vm_running "$name"; then cmd_harvest "$name"; return 0; fi
+  local nrun; nrun="$(tart list 2>/dev/null | awk '$1=="local" && $NF=="running"' | wc -l | tr -d ' ')"
+  if (( nrun >= 2 )); then
+    echo "reclaim: $name skipped — $nrun VMs already running (system cap)"; return 1
+  fi
+  local dir; dir="$(cat "$rec" 2>/dev/null || true)"; dir="${dir%/}"
+  ensure_sshpass
+  echo "reclaim: booting $name to recover '$(basename "${dir:-default}")' credential ..."
+  nohup tart run --no-graphics "$name" </dev/null >/dev/null 2>&1 &
+  disown || true
+  local blob="" i
+  for i in $(seq 1 60); do
+    blob="$(grab_vm_blob "$name" 2>/dev/null || true)"
+    [[ -n "$blob" ]] && break
+    # Guest self-halted (its agent found no job) before we could read it.
+    if (( i > 5 )) && ! vm_running "$name"; then break; fi
+    sleep 2
+  done
+  tart stop "$name" >/dev/null 2>&1 || true
+  if [[ -z "$blob" ]]; then
+    echo "reclaim: could not read credential from $name"; return 1
+  fi
+  adopt_blob_for "$dir" "$blob" "$name" || return 1
+  custody_release "$name"
 }
 
 # Keep every roster login alive and catch dead ones within hours instead
@@ -604,13 +663,28 @@ except Exception:
 # lineage so idle logins never rot. DEAD → Telegram (creds sourced from
 # .env.notify beside this script), deduped to one alert per login per day.
 account_keepalive() {
-  local d name out dead=0
+  local d name out vm dead=0
   while IFS= read -r d; do
     [[ "$d" == "-" ]] && d=""
     if [[ -z "$d" ]]; then name="default"; else name="$(basename "$d")"; fi
     if account_in_custody "$d"; then
       echo "SKIP $name — in custody of a running VM"
       continue
+    fi
+    # A custody record for a STOPPED (or vanished) VM means the guest may
+    # have rotated the refresh token and stranded the lineage tip on its
+    # disk. Refreshing host-side with our stale sibling would trip OAuth
+    # reuse detection and REVOKE THE WHOLE FAMILY (how ef and sub2 died,
+    # 2026-08-06) — so reclaim the blob from the VM first, and if that
+    # fails, skip the ping entirely rather than kill the login.
+    vm="$(custody_vm_for "$d" | head -1)"
+    if [[ -n "$vm" ]]; then
+      if ! reclaim_vm "$vm"; then
+        echo "STRANDED $name — credential held by stopped VM $vm, reclaim failed; NOT refreshing (would revoke the lineage)"
+        keepalive_notify "$name" \
+          "🟠 Claude login '$name' is STRANDED in stopped VM '$vm' (reclaim failed) — fix: cont reclaim $vm"
+        continue
+      fi
     fi
     if out="$(account_headroom_fresh "$d" 2>/dev/null)"; then
       echo "OK   $name — headroom ${out%% *}%"
@@ -623,19 +697,20 @@ account_keepalive() {
   return "$dead"
 }
 
-keepalive_notify() {  # $1 = account name; Telegram, 1 alert/login/day
+keepalive_notify() {  # $1 = account name, $2 = optional message; Telegram, 1 alert/login/day
   local envf="$SCRIPT_DIR/.env.notify"
   [[ -f "$envf" ]] || return 0
   # shellcheck disable=SC1090
   source "$envf" 2>/dev/null || return 0
   [[ -n "${TELEGRAM_BOT_TOKEN:-}" && -n "${TELEGRAM_CHAT_ID:-}" ]] || return 0
+  local msg="${2:-🔴 Claude login '$1' is DEAD (refresh failed) — re-login with: CLAUDE_CONFIG_DIR=~/.clawd-accounts/$1 claude /login}"
   local stamp="$CONFIG_DIR/keepalive-alerted-$1" now last
   now="$(date +%s)"; last="$(cat "$stamp" 2>/dev/null || echo 0)"
   (( now - last < 86400 )) && return 0
   echo "$now" > "$stamp"
   curl -fsS -m 10 "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
     -d chat_id="${TELEGRAM_CHAT_ID}" \
-    -d text="🔴 Claude login '$1' is DEAD (refresh failed) — re-login with: CLAUDE_CONFIG_DIR=~/.clawd-accounts/$1 claude /login" \
+    -d text="$msg" \
     >/dev/null 2>&1 || true
 }
 
@@ -845,6 +920,13 @@ cmd_rm() {
       timeout 45 "$self" harvest "$1" 2>&1 || true
     fi
     tart stop "$1" || true
+  elif [[ -f "$VM_ACCOUNTS_DIR/$1" && "${CONT_NO_RECLAIM:-}" != "1" ]]; then
+    # Stopped VM still holding a login: the guest may have rotated the
+    # refresh token and self-halted (auditor agents do), making its disk
+    # the lineage tip. Deleting it now would strand the login for good —
+    # boot-grab-stop first. CONT_NO_RECLAIM=1 skips (accepting the loss).
+    reclaim_vm "$1" \
+      || echo "rm: reclaim failed for $1 — deleting anyway (its login may need re-auth)" >&2
   fi
   custody_release "$1"
   tart delete "$1"
@@ -1098,6 +1180,9 @@ cont — programmatic macOS-on-macOS environments via tart
   cont harvest <name>         pull the VM's (possibly rotated) Claude
                               credential back into the host store; runs
                               automatically inside `cont down`/`cont rm`
+  cont reclaim <name>         recover a login stranded in a STOPPED custody
+                              VM: boot, grab the blob, stop immediately,
+                              adopt; runs automatically from keepalive/rm
   cont list                   list all VMs and their status
   cont status                 show base + list
   cont up <name>              clone base -> name (if missing) and boot
@@ -1126,6 +1211,7 @@ main() {
     auth)     cmd_auth "$@" ;;
     account)  cmd_account "$@" ;;
     harvest)  cmd_harvest "$@" ;;
+    reclaim)  require_name "${1:-}"; reclaim_vm "$1" ;;
     list|ls)  cmd_list ;;
     status)   cmd_status ;;
     up|start) cmd_up "$@" ;;
