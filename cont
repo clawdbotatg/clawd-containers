@@ -551,9 +551,13 @@ custody_vm_for() {  # $1 = config dir; prints the VM name(s) holding a custody r
 grab_vm_blob() {  # $1 = vm name; prints the guest's credential blob (or nothing)
   local ip; ip="$(tart ip "$1" 2>/dev/null || true)"
   [[ -n "$ip" ]] || return 1
-  sshpass -p "$SSH_PASS" ssh \
+  # ServerAlive + outer timeout: ConnectTimeout only covers the TCP
+  # connect — a guest that halts mid-session (auditor agents self-halt)
+  # otherwise leaves this ssh hung forever, wedging reclaim/keepalive.
+  timeout 25 sshpass -p "$SSH_PASS" ssh \
       -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
-      -o LogLevel=ERROR -o ConnectTimeout=8 "$SSH_USER@$ip" \
+      -o LogLevel=ERROR -o ConnectTimeout=8 \
+      -o ServerAliveInterval=5 -o ServerAliveCountMax=2 "$SSH_USER@$ip" \
       'security unlock-keychain -p admin "$HOME/Library/Keychains/login.keychain-db" 2>/dev/null;
        security find-generic-password -s "Claude Code-credentials" -w 2>/dev/null \
          || cat "$HOME/.claude/.credentials.json" 2>/dev/null' \
