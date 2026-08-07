@@ -86,7 +86,10 @@ Walk every exploit path step by step before rating a finding Critical or High. I
 
 Severity is not the same thing as confidence. A `[70]` confidence marker says how sure you are the bug is real; it says nothing about what it costs the client if it is. Reports that ship confidence scores alone leave the client to triage severity themselves, which is the job they paid for. The tally line is also what the published report renderer reads to build its severity strip, so a report without it renders as though it found nothing.
 
-Pin the audit target in the report header: the commit hash for a repo (`git rev-parse HEAD` of your clone), or the contract address + chain for on-chain source. Before finalizing, verify every `file:line` citation resolves — `sed -n '<N>p' <file>` must show the code the finding quotes. Sub-agent outputs often carry line numbers from chunked or flattened views; fix them against the real files, or drop the line number and keep only the quoted snippet. A citation that lands on the wrong code reads as fabrication to the client, whatever the finding's quality.
+Pin the audit target in the report header **so a reader can fetch exactly what you read**:
+
+- **Repo:** the clone URL *and* the commit hash together (`git rev-parse HEAD`). A hash on its own resolves to nothing — jobs 568 and 573 both shipped a bare commit with no repo named, and neither audit can now be reproduced. Verify the commit is actually reachable on the remote (`git ls-remote <url> <sha>`); if you audited a local or force-pushed tree, say so plainly instead of pinning a hash that will 404.
+- **On-chain source:** the contract address + chain id, one line per contract when several are in scope. Before finalizing, verify every `file:line` citation resolves — `sed -n '<N>p' <file>` must show the code the finding quotes. Sub-agent outputs often carry line numbers from chunked or flattened views; fix them against the real files, or drop the line number and keep only the quoted snippet. A citation that lands on the wrong code reads as fabrication to the client, whatever the finding's quality.
 
 ## Operating notes
 

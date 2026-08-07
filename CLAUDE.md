@@ -86,6 +86,24 @@ On macOS 26.x + tart 2.32.x, plain `tart run <name>` boots the VM but **never re
 - `install.sh` — installs `brew`/`tart`/`sshpass`, symlinks `cont` to `/usr/local/bin`
 - `provision.sh` — sample idempotent in-VM script (Homebrew, Chrome, iTerm, dock tweaks); the default target of `cont provision`
 
+## Checking what the fleet shipped
+
+`completeJob` is the end of the line — nothing downstream inspects the
+deliverable. **[`REVIEW.md`](REVIEW.md)** is the design for a second pass;
+its Layer 1 has landed as `./scripts/leftclaw/mech-check.sh <job_id>...`
+(also `--queue`, `--json`; exit 1 on any FAIL). It verifies the report
+fetches, the target pin is *reachable*, quoted code really sits at the
+lines it cites, stage notes exist, the severity tally is present and
+matches, and no client message went unanswered. It works on any worker's
+jobs, so it benchmarks the competition too.
+
+**If you change the citation resolver, run `python3 tests/test_mech_check.py`.**
+Every case in it is a false positive the checker once produced against a real
+report — annotated quotes, remediation diffs, operator spacing, flattened
+multi-line statements. A FAIL from this tool is only worth reading if it never
+cries wolf, so the suite pins both directions: real drift and fabricated quotes
+must still be caught.
+
 ## Hard requirements
 
 - macOS host on Apple Silicon (tart needs Virtualization.framework + arm64)

@@ -411,14 +411,17 @@ def _find_exact(flines, cands, lo, hi):
     quoted line — so compare against joined windows, not just single lines.
     """
     lo, hi = max(1, lo), min(len(flines), hi)
-    normed = [norm(c) for c in cands]
-    for i in range(lo - 1, hi):
-        for span in range(1, WINDOW + 1):
+    normed = [c for c in (norm(c) for c in cands) if c]
+    # Widen the window only after every single-line match has been ruled out.
+    # Otherwise a 5-line join starting above the real line reports the window's
+    # first line, and the drift offset we print is wrong by up to WINDOW-1.
+    for span in range(1, WINDOW + 1):
+        for i in range(lo - 1, hi):
             blob = norm("".join(flines[i:i + span]))
             if not blob:
                 continue
             for c in normed:
-                if c and c in blob:
+                if c in blob:
                     return i + 1
     return None
 
