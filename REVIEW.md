@@ -39,20 +39,48 @@ and `~/.claude/projects` to `archive/<job_id>/` on the host (best-effort,
 `|| true` — a failed harvest must never block a stop). Until this lands,
 the review pass can only see the deliverable, not the work.
 
-## Layer 1 — mechanical checks (scriptable, no model)
+## Layer 1 — mechanical checks (scriptable, no model) — **landed**
 
-Run per completed job, exit codes feed the scorecard:
+`./scripts/leftclaw/mech-check.sh <job_id>...` (also `--queue`, `--json`).
+Exit 1 if any check FAILs, so it can gate a scorecard run. Works on any
+worker's jobs, so it also benchmarks the competition.
 
 - `resultURL` fetches, non-trivial size, parses as markdown.
 - Report pins a commit hash (audits of repos) or contract address+chain
-  (on-chain targets).
+  (on-chain targets) — **and the pin is reachable**. Job 565 pinned
+  `96b2c2a4…`, which the remote answers with `upload-pack: not our ref`:
+  the audited tree cannot be recovered by anyone, including us.
 - **Line-reference resolution**: extract `file.sol:N` citations + quoted
   snippets, clone the target at the pinned commit, verify each snippet
   appears within ±5 lines of the cited location. Score = % resolved.
   (This is the check job 372 fails today.)
-- Stage notes present for every stage the service type defines; finding
-  counts in stage notes match the report's summary table.
+- Finding counts claimed in the last stage note match the report's own
+  `**Severity counts:**` line — and that line exists at all, since the
+  published-page renderer reads it to build the severity strip.
 - Every escalation in the message thread got a response before complete.
+
+Two calibration rules learned building it, both worth preserving:
+
+1. **Never score drift against the wrong tree.** When the pinned commit is
+   unreachable the check falls back to HEAD, caps itself at WARN, and labels
+   the number "not attributable" — a repo that moved on is not a bad report.
+   The failure is recorded against `pin`, where it belongs.
+2. **Strip the report's own annotations before matching.** Reports append
+   `// line 183` to quoted code. Left in, every annotated snippet reads as
+   "not found in file" — a false accusation of fabrication against good work.
+
+Known coverage gap: Sourcify does not mirror most Base Sepolia contracts even
+when BaseScan has them verified, so on-chain Base targets SKIP the citation
+check. `ETHERSCAN_API_KEY` (free, multichain V2) closes it.
+
+Baseline over our own completed jobs, 2026-08-06:
+
+| Job | Verdict | Notable |
+|---|---|---|
+| 565 | FAIL | pin unreachable; no severity-counts line (predates the prompt fix) |
+| 568 | CLEAN | note and report agree 1C/3H/11M/14L/12I |
+| 570 | WARN | last note claimed 2 Critical, report tallies 0 — reconciliation downgrade |
+| 573 | CLEAN | 4/4 citations resolved against Sourcify-verified source |
 
 ## Layer 2 — judge review (model, rubric-driven)
 

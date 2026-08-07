@@ -19,6 +19,32 @@ internally so the agent never sees `PRIVATE_KEY` or your auth signature.
 | `decline.sh` | `<job_id>` | `PRIVATE_KEY` | `declineJob(uint256)` |
 | `log-work.sh` | `<job_id> <stage> <note>` | `PRIVATE_KEY` | `logWork(uint256,string,string)` (note, stage swapped on the wire to match contract sig) |
 | `complete.sh` | `<job_id> <result_url>` | `PRIVATE_KEY` | `completeJob(uint256,string)` — result_url MUST be a full `https://{CID}.ipfs.community.bgipfs.com/...` URL |
+| `review-queue.sh` | `[from_id]`, `--mark <id>` | `ALCHEMY_API_KEY` | COMPLETED jobs past a watermark, one JSON line each — intake for the review pass |
+| `mech-check.sh` | `<job_id>...`, `--queue`, `--json` | `ALCHEMY_API_KEY` | Layer 1 of [REVIEW.md](../../REVIEW.md): mechanical checks over a delivered job. Exit 1 if any check FAILs |
+
+### `mech-check.sh` — what it checks
+
+Works on **any** worker's jobs, not just ours, so it doubles as a way to
+benchmark the competition. Runs six checks and prints PASS/WARN/FAIL/SKIP:
+
+| Check | Fails when |
+|---|---|
+| `result-fetch` | resultURL missing, unfetchable, under 2 KB, or not markdown |
+| `pin` | no commit hash / contract address, **or a commit the remote won't serve** (audit not reproducible) |
+| `citations` | quoted code isn't within ±5 lines of its `File.sol:N` citation |
+| `stages` | zero `logWork` notes — the client watched a blank screen |
+| `count-match` | no `**Severity counts:**` line (the pretty page renders a blank strip) |
+| `escalations` | a client message went unanswered before completion |
+
+Two things worth knowing before you trust a result:
+
+- **Citations need the target's source.** Repos are cloned at the pinned
+  commit. On-chain targets come from Sourcify — which does *not* mirror most
+  Base Sepolia contracts even when BaseScan has them verified, so those SKIP.
+  Set `ETHERSCAN_API_KEY` (free, multichain V2) to close that gap.
+- **If the pinned commit is gone, drift is not the report's fault.** The check
+  falls back to HEAD, caps itself at WARN, and says so; the reproducibility
+  failure is reported against `pin` instead.
 
 ## Service types
 
