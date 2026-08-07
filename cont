@@ -179,23 +179,75 @@ resolve_claude_bin() {
   printf '%s\n' "$b"
 }
 
+# Is a claude process (anyone's — a harness session, a hand-launched
+# terminal, another ping) running under this config dir right now? Such a
+# process holds and lazily renews the account's rotating refresh grant; a
+# second consumer replaying that grant trips OAuth reuse detection and
+# revokes the whole token family (how sub3 died 2026-08-06). A claude with
+# no CLAUDE_CONFIG_DIR in its env is on the default account.
+claude_dir_live() {  # $1 = config dir ("" = default)
+  local dir="${1%/}"
+  ps axeww -o command= 2>/dev/null | python3 -c '
+import os, re, sys
+want = os.path.normpath(os.path.expanduser(sys.argv[1] or "~/.claude"))
+for line in sys.stdin:
+    line = line.strip()
+    if os.path.basename(line.split(None, 1)[0] if line else "") != "claude":
+        continue
+    m = re.search(r"CLAUDE_CONFIG_DIR=(\S+)", line)
+    d = os.path.normpath(os.path.expanduser((m.group(1) if m else "~/.claude").rstrip("/")))
+    if d == want:
+        sys.exit(0)
+sys.exit(1)' "$dir"
+}
+
+# Run a command while holding an exclusive per-account refresh lock —
+# the SAME lock file the harness poller takes (<config dir>/.refresh.lock)
+# — so cont and the harness can never rotate one grant simultaneously.
+# Blocks up to 90s for the lock, then gives up (exit 75).
+locked_run() {  # $1 = lock file; rest = command
+  python3 - "$@" <<'PY'
+import fcntl, subprocess, sys, time
+lf, cmd = sys.argv[1], sys.argv[2:]
+f = open(lf, "w")
+deadline = time.time() + 90
+while True:
+    try:
+        fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        break
+    except OSError:
+        if time.time() > deadline:
+            sys.exit(75)
+        time.sleep(1)
+sys.exit(subprocess.run(cmd, stdin=subprocess.DEVNULL).returncode)
+PY
+}
+
 # Minimal `claude -p` under a given config dir so Claude Code itself
 # refreshes-and-rewrites that account's keychain entry (never hand-roll the
 # OAuth refresh: discarding the rotated refresh token kills the account).
 # For the default account CLAUDE_CONFIG_DIR must be UNSET — shells on this
 # host export it pointing at a harness account (2026-07-09 trap).
+# Guards (both born of the sub3 postmortem, 2026-08-06): never ping while a
+# live claude owns the grant, and hold the cross-process refresh lock for
+# the ping's whole life so no other deliberate refresher can interleave.
 claude_ping_dir() {  # $1 = config dir ("" = default)
   local dir="${1%/}"
   local claude_bin
   claude_bin="$(resolve_claude_bin)" || return 1
-  # </dev/null: claude -p reads stdin — without this it eats the stdin of
-  # any while-read loop that calls us (the account roster bug).
+  if claude_dir_live "$dir"; then
+    echo "ping skipped: a live claude process owns '${dir:-default}'" >&2
+    return 1
+  fi
+  local lock="${dir:-$HOME/.claude}/.refresh.lock"
+  # </dev/null via locked_run: claude -p reads stdin — without this it eats
+  # the stdin of any while-read loop that calls us (the account roster bug).
   if [[ -z "$dir" ]]; then
-    timeout 60 env -u CLAUDE_CONFIG_DIR "$claude_bin" -p --output-format text \
-      "reply with the single word OK" </dev/null >/dev/null 2>&1
+    locked_run "$lock" timeout 60 env -u CLAUDE_CONFIG_DIR "$claude_bin" \
+      -p --output-format text "reply with the single word OK" >/dev/null 2>&1
   else
-    CLAUDE_CONFIG_DIR="$dir" timeout 60 "$claude_bin" -p --output-format text \
-      "reply with the single word OK" </dev/null >/dev/null 2>&1
+    locked_run "$lock" env "CLAUDE_CONFIG_DIR=$dir" timeout 60 "$claude_bin" \
+      -p --output-format text "reply with the single word OK" >/dev/null 2>&1
   fi
 }
 
@@ -690,8 +742,21 @@ account_keepalive() {
         continue
       fi
     fi
+    # A live claude process (a harness session, a hand-launched terminal)
+    # owns this grant and renews it itself — pinging alongside it is the
+    # two-consumers race that killed sub3 (2026-08-06).
+    if claude_dir_live "$d"; then
+      echo "SKIP $name — a live claude process owns this grant (it keeps the credential fresh)"
+      continue
+    fi
     if out="$(account_headroom_fresh "$d" 2>/dev/null)"; then
       echo "OK   $name — headroom ${out%% *}%"
+    elif blob_has_tokens "$d"; then
+      # Probe failed but the tokens are intact — endpoint 429/outage or a
+      # lost lock race, NOT a dead login (austinmax was false-alarmed DEAD
+      # this way 2026-08-06). A real revocation wipes the blob's tokens;
+      # the next tick will see that and alert.
+      echo "WARN $name — probe failed but credential intact (transient); not alerting"
     else
       echo "DEAD $name — no usable credential (re-login: CLAUDE_CONFIG_DIR=${d:-~/.claude} claude /login)"
       keepalive_notify "$name"
@@ -699,6 +764,16 @@ account_keepalive() {
     fi
   done < <(account_roster)
   return "$dead"
+}
+
+blob_has_tokens() {  # $1 = config dir: blob exists and still carries tokens?
+  read_claude_blob_for "$1" 2>/dev/null | python3 -c '
+import json, sys
+try:
+    o = json.load(sys.stdin).get("claudeAiOauth", {})
+except Exception:
+    sys.exit(1)
+sys.exit(0 if (o.get("accessToken") or o.get("refreshToken")) else 1)'
 }
 
 keepalive_notify() {  # $1 = account name, $2 = optional message; Telegram, 1 alert/login/day
