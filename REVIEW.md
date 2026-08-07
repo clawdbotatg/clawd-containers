@@ -59,28 +59,43 @@ worker's jobs, so it also benchmarks the competition.
   published-page renderer reads it to build the severity strip.
 - Every escalation in the message thread got a response before complete.
 
-Two calibration rules learned building it, both worth preserving:
+The rule that shapes the whole design: **never score a report against a tree
+it did not read.** When the pin is unreachable, or a commit is pinned with no
+repo named, the check still runs but caps at WARN and labels the number "not
+attributable" — the pin problem is recorded against `pin`, where it belongs.
 
-1. **Never score drift against the wrong tree.** When the pinned commit is
-   unreachable the check falls back to HEAD, caps itself at WARN, and labels
-   the number "not attributable" — a repo that moved on is not a bad report.
-   The failure is recorded against `pin`, where it belongs.
-2. **Strip the report's own annotations before matching.** Reports append
-   `// line 183` to quoted code. Left in, every annotated snippet reads as
-   "not found in file" — a false accusation of fabrication against good work.
-
-Known coverage gap: Sourcify does not mirror most Base Sepolia contracts even
-when BaseScan has them verified, so on-chain Base targets SKIP the citation
-check. `ETHERSCAN_API_KEY` (free, multichain V2) closes it.
+Source resolution: repos are cloned at the pin; on-chain targets try Sourcify,
+then Etherscan multichain V2. Sourcify does not mirror most Base Sepolia
+contracts even when BaseScan has them verified, so Etherscan carries that case.
+No key is required — it defaults to scaffold-eth-2's shared public key, the
+same pattern SE-2 uses in `hardhat.config.ts`. Set `ETHERSCAN_API_KEY` for
+sustained use.
 
 Baseline over our own completed jobs, 2026-08-06:
 
 | Job | Verdict | Notable |
 |---|---|---|
-| 565 | FAIL | pin unreachable; no severity-counts line (predates the prompt fix) |
-| 568 | CLEAN | note and report agree 1C/3H/11M/14L/12I |
-| 570 | WARN | last note claimed 2 Critical, report tallies 0 — reconciliation downgrade |
-| 573 | CLEAN | 4/4 citations resolved against Sourcify-verified source |
+| 565 | FAIL | pinned commit not in the remote; no severity-counts line (predates the prompt fix) |
+| 568 | WARN | commit pin unresolvable (no repo named); citations 13/16 vs deployed source |
+| 570 | WARN | 3/3 citations resolve; last note claimed 2 Critical, report tallies 0 |
+| 573 | WARN | 4/4 citations resolve; commit pin unresolvable |
+
+**Every FAIL this tool reported on its first pass at a report was its own bug.**
+Five distinct false-positive classes, each caught only by checking a flagged
+citation against the actual source before believing it:
+
+| Symptom | Cause |
+|---|---|
+| "quoted code not found" everywhere | reports annotate quotes with `// line 183` |
+| ditto, on remediation blocks | ```diff fixes quote code that deliberately doesn't exist yet |
+| ditto, on adjacent citations | a neighbouring `path.sol:N` read as the first one's quoted code |
+| `n-1` vs `n - 1` | whitespace collapsed to single spaces instead of removed |
+| multi-line `if (...)` | matcher compared single source lines only |
+
+The lesson generalises past this tool: **a checker that reports a defect it
+cannot substantiate is worse than no checker**, because it teaches the reader
+to ignore it. Verify a sample of every new check's hits by hand before trusting
+the aggregate.
 
 ## Layer 2 — judge review (model, rubric-driven)
 

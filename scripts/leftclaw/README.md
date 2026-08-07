@@ -39,12 +39,17 @@ benchmark the competition. Runs six checks and prints PASS/WARN/FAIL/SKIP:
 Two things worth knowing before you trust a result:
 
 - **Citations need the target's source.** Repos are cloned at the pinned
-  commit. On-chain targets come from Sourcify — which does *not* mirror most
-  Base Sepolia contracts even when BaseScan has them verified, so those SKIP.
-  Set `ETHERSCAN_API_KEY` (free, multichain V2) to close that gap.
-- **If the pinned commit is gone, drift is not the report's fault.** The check
-  falls back to HEAD, caps itself at WARN, and says so; the reproducibility
-  failure is reported against `pin` instead.
+  commit. On-chain targets try Sourcify, then Etherscan's multichain V2
+  endpoint — Sourcify does *not* mirror most Base Sepolia contracts even when
+  BaseScan has them verified. No key required: the Etherscan call defaults to
+  scaffold-eth-2's shared public key (its `hardhat.config.ts` pattern), which
+  is rate-limited. Set `ETHERSCAN_API_KEY` for sustained use.
+- **A result is only attributable when it was measured against the tree the
+  report actually read.** If the pinned commit is gone the check falls back to
+  HEAD; if a report pins a commit but names no repo, it falls back to the
+  deployed contract's verified source. Both cap at WARN and say so, and the
+  pin problem is reported against `pin` instead — a repo that moved on is not
+  a bad report.
 
 ## Service types
 

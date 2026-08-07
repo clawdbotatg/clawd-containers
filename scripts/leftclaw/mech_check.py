@@ -35,6 +35,14 @@ EV_COMPLETED = "0x884d377a76a733295a9fde0f6f3729db2762d3ed11c468fa3904b134ab552d
 
 CACHE = os.path.expanduser("~/.cache/leftclaw-mech")
 
+# Etherscan's multichain V2 endpoint covers the testnets Sourcify doesn't
+# mirror. Rather than make a key mandatory, borrow scaffold-eth-2's pattern:
+# ship its shared public key as the default and let ETHERSCAN_API_KEY override.
+# It is published in scaffold-eth-2's hardhat.config.ts for exactly this use
+# and is rate-limited — fine for reviewing a handful of jobs, set your own for
+# anything sustained.
+SHARED_ETHERSCAN_KEY = "DNXJA8RX2Q3VZ4URQIWP7Z68CJXQZSC6AW"
+
 # How far a quoted snippet may sit from its cited line before we call it drift.
 # Reports legitimately cite the head of a function and quote a few lines into
 # it, so this is deliberately loose; it still catches the hundreds-of-lines
@@ -292,9 +300,7 @@ def sourcify_sources(chain, addr):
     except (urllib.error.URLError, OSError, json.JSONDecodeError, AttributeError):
         pass
 
-    key = os.environ.get("ETHERSCAN_API_KEY")
-    if not key:
-        return {}
+    key = os.environ.get("ETHERSCAN_API_KEY") or SHARED_ETHERSCAN_KEY
     try:
         raw = fetch(f"https://api.etherscan.io/v2/api?chainid={chain}&module=contract"
                     f"&action=getsourcecode&address={addr}&apikey={key}", timeout=45)
@@ -322,16 +328,44 @@ CITE_RE = re.compile(r"([A-Za-z0-9_][A-Za-z0-9_./-]*\.sol)\s*:\s*(\d+)(?:\s*[-�
 
 
 def norm(s):
-    """Whitespace-insensitive form, so indentation changes don't read as drift."""
-    return re.sub(r"\s+", " ", s).strip()
+    """Whitespace-free form for comparing a quote against source.
+
+    Collapsing runs to single spaces is not enough: reports routinely quote
+    `_pauseWindows[n-1].end` where the file reads `_pauseWindows[n - 1].end`.
+    That is the same line of code, and spacing around operators must not
+    decide whether a citation resolves.
+    """
+    return re.sub(r"\s+", "", s)
+
+
+FIX_CONTEXT = re.compile(r"\*\*(?:Fix|Recommendation|Mitigation|Patch)\b|^#{2,5}\s*(?:Fix|Recommend)",
+                         re.I | re.M)
+
+
+def is_proposed_fix(lang, body, ctx):
+    """A remediation diff is not a claim about what the source says.
+
+    Reports end findings with a ```diff showing the patch they recommend. Its
+    `+` lines are code that deliberately does not exist yet, and the block is
+    often about a different file than the finding's own citation. Checking
+    either against the target manufactures 'quoted code not found in file' —
+    an accusation of fabrication aimed at a correct report.
+    """
+    if lang.strip().lower() == "diff":
+        return True
+    if any(l.startswith("+") for l in body) and any(l.startswith("-") for l in body):
+        return True
+    return bool(FIX_CONTEXT.search("\n".join(ctx.split("\n")[-3:])))
 
 
 def code_blocks(md):
-    """Fenced blocks as (body_lines, context) — context is what precedes them."""
+    """Fenced blocks as (body_lines, context), excluding remediation diffs."""
     lines = md.split("\n")
     blocks, i = [], 0
     while i < len(lines):
-        if lines[i].lstrip().startswith("```"):
+        stripped = lines[i].lstrip()
+        if stripped.startswith("```"):
+            lang = stripped[3:]
             start = i
             i += 1
             body = []
@@ -339,7 +373,8 @@ def code_blocks(md):
                 body.append(lines[i])
                 i += 1
             ctx = "\n".join(lines[max(0, start - 6):start])
-            blocks.append((body, ctx))
+            if not is_proposed_fix(lang, body, ctx):
+                blocks.append((body, ctx))
         i += 1
     return blocks
 
@@ -360,7 +395,87 @@ def candidate_lines(body):
         t = re.sub(r"\s*//.*$", "", t).strip()
         if len(re.sub(r"\s", "", t)) < 12:
             continue
-        out.append(norm(t))
+        out.append(t)          # raw; callers norm() or tokenize as needed
+    return out
+
+
+IDENT = re.compile(r"[A-Za-z_][A-Za-z0-9_]{2,}")
+WINDOW = 5          # source lines a single quoted statement may span
+TOKEN_MATCH = 0.8   # identifier overlap that counts as the same code
+
+
+def _find_exact(flines, cands, lo, hi):
+    """First line in [lo,hi] where a quote appears, allowing it to span lines.
+
+    Reports flatten multi-line statements — a four-line `if (...)` becomes one
+    quoted line — so compare against joined windows, not just single lines.
+    """
+    lo, hi = max(1, lo), min(len(flines), hi)
+    normed = [norm(c) for c in cands]
+    for i in range(lo - 1, hi):
+        for span in range(1, WINDOW + 1):
+            blob = norm("".join(flines[i:i + span]))
+            if not blob:
+                continue
+            for c in normed:
+                if c and c in blob:
+                    return i + 1
+    return None
+
+
+def _token_match(flines, cands, lo, hi):
+    """Same code, lightly reworded.
+
+    Job 570 quotes `CostBasis.sequencerUpFor(feed) <= SEQ_SETTLE_GRACE …` where
+    the source names the argument `sequencerUptimeFeed`. The citation is right
+    and the substance is right; only an identifier was shortened for reading.
+    Demanding a byte-exact quote there would call good work fabricated.
+    """
+    lo, hi = max(1, lo), min(len(flines), hi)
+    ftoks = set(IDENT.findall(" ".join(flines[lo - 1:hi])))
+    if not ftoks:
+        return False
+    for c in cands:
+        ctoks = set(IDENT.findall(c))
+        if ctoks and len(ctoks & ftoks) / len(ctoks) >= TOKEN_MATCH:
+            return True
+    return False
+
+
+# `GoodBidAuction.sol:1665`: `if (bidder == lot.leader) revert AlreadyLeader();`
+# — the citation and its evidence in one breath, which is how the strongest
+# findings actually read. Verified exactly like a fenced block.
+INLINE_RE = re.compile(
+    r"`([A-Za-z0-9_][A-Za-z0-9_./-]*\.sol)\s*:\s*(\d+)(?:\s*[-–—]\s*(\d+))?`"
+    r"[^`\n]{0,24}`([^`\n]{16,})`")
+
+
+CODE_SIGNAL = re.compile(r"[;{}()=<>]|\b(?:function|revert|require|return|if|mapping|uint\d*|address|bool)\b")
+
+
+def looks_like_code(s):
+    """Guard against the neighbouring-citation trap.
+
+    Findings often list locations back to back —
+    `GoodBidAuction.sol:312`, `lib/CostBasis.sol:409` — and a naive
+    citation-then-backticks match reads the second *path* as the first one's
+    quoted code, then reports it missing from the source. Require something
+    that actually looks like Solidity, and never accept a bare file:line.
+    """
+    t = s.strip()
+    if CITE_RE.fullmatch(t) or re.fullmatch(r"[A-Za-z0-9_./-]+\.sol(:\d+(-\d+)?)?", t):
+        return False
+    return bool(CODE_SIGNAL.search(t))
+
+
+def inline_claims(md):
+    out = []
+    for fname, start, end, code in INLINE_RE.findall(md):
+        if not looks_like_code(code):
+            continue
+        cands = candidate_lines([code])
+        if cands:
+            out.append(((fname, start, end), cands))
     return out
 
 
@@ -376,18 +491,21 @@ def resolve_citations(md, files):
     for path, text in files.items():
         by_base.setdefault(os.path.basename(path), []).append((path, text.split("\n")))
 
-    resolved, drifted, missed, unverifiable = 0, [], [], 0
+    claims = []
     for body, ctx in code_blocks(md):
         head = "\n".join(body[:2])
         cites = CITE_RE.findall(ctx) or CITE_RE.findall(head)
-        if not cites:
-            continue
-        cands = candidate_lines(body)
+        if cites:
+            claims.append((cites[0], candidate_lines(body)))
+    claims += inline_claims(md)
+
+    resolved, drifted, missed, unverifiable = 0, [], [], 0
+    for cite, cands in claims:
         if not cands:
             unverifiable += 1
             continue
 
-        fname, start_s, end_s = cites[0]
+        fname, start_s, end_s = cite
         start = int(start_s)
         end = int(end_s) if end_s else start
         targets = by_base.get(os.path.basename(fname))
@@ -398,17 +516,15 @@ def resolve_citations(md, files):
         best_hit = None
         found_anywhere = []
         for path, flines in targets:
-            for cand in cands:
-                for idx, fl in enumerate(flines, 1):
-                    if cand and cand in norm(fl):
-                        found_anywhere.append(idx)
-                        if start - SLACK <= idx <= end + SLACK:
-                            best_hit = idx
-                            break
-                if best_hit:
-                    break
-            if best_hit:
+            hit = _find_exact(flines, cands, start - SLACK, end + SLACK)
+            if hit is None and _token_match(flines, cands, start - SLACK, end + SLACK):
+                hit = start
+            if hit:
+                best_hit = hit
                 break
+            elsewhere = _find_exact(flines, cands, 1, len(flines))
+            if elsewhere:
+                found_anywhere.append(elsewhere)
 
         if best_hit:
             resolved += 1
@@ -428,11 +544,17 @@ def check_citations(md, description, pin):
     warn_prefix = []
     repo = repo_url_from(description) or repo_url_from(md)
     addrs = []
+    basis_mismatch = False
+    pin_unreachable = False
     if not repo:
         # A commit hash with no repo to resolve it against is dead weight; if
-        # the job names on-chain targets, check those instead.
+        # the job names on-chain targets, check those instead. But a report
+        # that pinned a *commit* was read against a source tree we then have
+        # no way to obtain — deployed source may be a different revision, so
+        # anything that fails to match is not attributable to the report.
         addrs, ch = onchain_target(description, md)
         if addrs:
+            basis_mismatch = kind == "commit"
             kind, value, chain = "address", addrs[0], ch
         elif kind == "address":
             addrs = [value]
@@ -452,6 +574,7 @@ def check_citations(md, description, pin):
                         except OSError:
                             pass
             note = repo.split("github.com/")[1] + f"@{actual[:12]}"
+            pin_unreachable = not pinned_ok
             if not pinned_ok:
                 warn_prefix.append(
                     f"pinned commit {value[:12]} is not in the remote — "
@@ -461,15 +584,20 @@ def check_citations(md, description, pin):
             for a in (addrs or [value]):
                 files.update(sourcify_sources(chain, a))
             got = len(addrs or [value])
-            note = f"sourcify {chain}/{(addrs or [value])[0][:10]}…"
+            note = f"verified-source {chain}/{(addrs or [value])[0][:10]}…"
             if got > 1:
                 note += f" (+{got - 1} more)"
+            if basis_mismatch:
+                warn_prefix.append(
+                    "report pins a commit but names no repo — checked against "
+                    "the deployed contract's verified source, which may be a "
+                    "different revision; misses are not attributable")
     except RuntimeError as e:
         return Check("citations", SKIP, f"source unavailable: {e}")
 
     if not files:
-        why = ("target contract is not verified on Sourcify (set ETHERSCAN_API_KEY "
-               "to fall back to the explorer)") if kind == "address" else \
+        why = ("target contract has no verified source on Sourcify or Etherscan"
+               ) if kind == "address" else \
               "no target source available to check against"
         return Check("citations", SKIP, why)
 
@@ -490,9 +618,10 @@ def check_citations(md, description, pin):
         # accuracy. Never let that read as a deliverable defect — the real
         # problem is the unreproducible pin, which `pin` reports.
         status = min(status, WARN, key=lambda s: [PASS, WARN, FAIL].index(s))
-        summary += " — vs HEAD, not the audited tree; drift not attributable"
+        summary += " — not the audited tree; result not attributable"
     chk = Check("citations", status, summary, detail)
-    chk.flags["pin_unreachable"] = bool(warn_prefix)
+    chk.flags["pin_unreachable"] = pin_unreachable
+    chk.flags["basis_mismatch"] = basis_mismatch
     return chk
 
 
@@ -658,6 +787,13 @@ def run_job(job_id):
             c_pin = Check("pin", FAIL,
                           f"{c_pin.summary} — not reachable in the remote; "
                           f"the audited tree cannot be reproduced")
+        elif c_cite.flags.get("basis_mismatch"):
+            # A commit with no repo named anywhere resolves to nothing; the
+            # target was on-chain. Weaker than a broken pin, but it still
+            # leaves the reader unable to fetch what was audited.
+            c_pin = Check("pin", WARN,
+                          f"{c_pin.summary} — but the report names no repo, so "
+                          f"the commit cannot be resolved; target was on-chain")
         checks.append(c_pin)
         checks.append(c_cite)
     checks.append(check_stages(notes, service_type, last_stage))
