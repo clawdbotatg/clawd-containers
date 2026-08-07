@@ -13,3 +13,7 @@
 
 # generated pretty reports (published to leftclaw-services, not here)
 scripts/report/out/
+
+# Python bytecode
+__pycache__/
+*.pyc
