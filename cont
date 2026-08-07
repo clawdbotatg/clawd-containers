@@ -600,20 +600,33 @@ custody_vm_for() {  # $1 = config dir; prints the VM name(s) holding a custody r
 # update the host keychain entry in place (-U preserves the ACL claude
 # set on its own item) and mirror to <dir>/.credentials.json, which
 # read_claude_blob_for and claude both fall back to.
-grab_vm_blob() {  # $1 = vm name; prints the guest's credential blob (or nothing)
-  local ip; ip="$(tart ip "$1" 2>/dev/null || true)"
+grab_vm_blob() {  # $1 = vm name; prints the guest's credential blob.
+  # rc 0 = blob read; rc 2 = ssh OK but the guest POSITIVELY has no
+  # credential (keychain answered absent + no file — e.g. the guest's
+  # claude wiped it after a rejected refresh); rc 1 = couldn't reach the
+  # guest (unknown — treat as "may still hold the lineage tip"). The
+  # sentinel is what separates 2 from 1: without it, a wiped guest looked
+  # identical to a dead ssh and reclaim STRANDED the login forever
+  # (austinmax/auditor loop, 2026-08-07).
+  local ip out; ip="$(tart ip "$1" 2>/dev/null || true)"
   [[ -n "$ip" ]] || return 1
   # ServerAlive + outer timeout: ConnectTimeout only covers the TCP
   # connect — a guest that halts mid-session (auditor agents self-halt)
   # otherwise leaves this ssh hung forever, wedging reclaim/keepalive.
-  timeout 25 sshpass -p "$SSH_PASS" ssh \
+  out="$(timeout 25 sshpass -p "$SSH_PASS" ssh \
       -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
       -o LogLevel=ERROR -o ConnectTimeout=8 \
       -o ServerAliveInterval=5 -o ServerAliveCountMax=2 "$SSH_USER@$ip" \
       'security unlock-keychain -p admin "$HOME/Library/Keychains/login.keychain-db" 2>/dev/null;
+       echo __CONT_SSH_OK__;
        security find-generic-password -s "Claude Code-credentials" -w 2>/dev/null \
          || cat "$HOME/.claude/.credentials.json" 2>/dev/null' \
-      2>/dev/null
+      2>/dev/null)" || true
+  [[ "$out" == *__CONT_SSH_OK__* ]] || return 1
+  out="${out#*__CONT_SSH_OK__}"
+  out="${out#$'\n'}"
+  [[ -n "$out" ]] || return 2
+  printf '%s' "$out"
 }
 
 # Adopt a guest blob into the host store for a config dir, iff it is newer
@@ -649,8 +662,14 @@ except Exception:
   path="${dir:-$HOME/.claude}/.credentials.json"
   ( umask 077; printf '%s' "$blob" > "$path" )
   if security find-generic-password -s "$svc" >/dev/null 2>&1; then
+    # Trim + fall back to $USER: an untrimmed acct once minted a SECOND
+    # item under the same service (acct " austingriffith", sub2 2026-08-06)
+    # — a split-brain store where each reader follows its own lineage and
+    # one side's refresh eventually revokes the family.
     acct="$(security find-generic-password -s "$svc" 2>/dev/null \
-      | sed -n 's/^ *"acct"<blob>="\(.*\)"$/\1/p')"
+      | sed -n 's/^ *"acct"<blob>="\(.*\)"$/\1/p' | head -1 \
+      | awk '{$1=$1; print}')"
+    acct="${acct:-$USER}"
     if ! security add-generic-password -U -s "$svc" ${acct:+-a "$acct"} -w "$blob" 2>/dev/null; then
       # In-place update refused (ACL) — clear the stale entry so reads
       # fall through to the fresh .credentials.json we just wrote.
@@ -696,17 +715,45 @@ reclaim_vm() {
   echo "reclaim: booting $name to recover '$(basename "${dir:-default}")' credential ..."
   nohup tart run --no-graphics "$name" </dev/null >/dev/null 2>&1 &
   disown || true
-  local blob="" i
+  local blob="" rc i empty_seen=0
   for i in $(seq 1 60); do
-    blob="$(grab_vm_blob "$name" 2>/dev/null || true)"
+    rc=0; blob="$(grab_vm_blob "$name" 2>/dev/null)" || rc=$?
     [[ -n "$blob" ]] && break
+    (( rc == 2 )) && empty_seen=$((empty_seen + 1))
     # Guest self-halted (its agent found no job) before we could read it.
     if (( i > 5 )) && ! vm_running "$name"; then break; fi
     sleep 2
   done
   tart stop "$name" >/dev/null 2>&1 || true
   if [[ -z "$blob" ]]; then
+    if (( empty_seen >= 3 )); then
+      # The guest ANSWERED, repeatedly: no credential on board. Its claude
+      # wiped the blob after a rejected refresh (the usual case — a staged
+      # copy going stale mid-custody) or it never had one; either way the
+      # guest can never rotate this lineage again, so custody is moot and
+      # the host copy — whatever its state — is the best there is. Before
+      # this verdict existed, a wiped guest looked like a failed reclaim
+      # and STRANDED a perfectly healthy host login forever (austinmax in
+      # 'auditor', 2026-08-07).
+      echo "reclaim: $name positively holds no credential — releasing custody (host copy stands)"
+      custody_release "$name"
+      return 0
+    fi
     echo "reclaim: could not read credential from $name"; return 1
+  fi
+  # A readable blob whose tokens are EMPTY is claude's rejected-refresh wipe
+  # signature — same verdict as absent. (Malformed JSON is NOT proof: fall
+  # through and let adopt_blob_for reject it, keeping the login stranded.)
+  if ! printf '%s' "$blob" | python3 -c '
+import json, sys
+try:
+    o = json.load(sys.stdin).get("claudeAiOauth", {})
+except Exception:
+    sys.exit(0)  # malformed != provably wiped
+sys.exit(0 if (o.get("accessToken") or o.get("refreshToken")) else 1)' 2>/dev/null; then
+    echo "reclaim: $name blob is token-less (guest wiped it) — releasing custody (host copy stands)"
+    custody_release "$name"
+    return 0
   fi
   adopt_blob_for "$dir" "$blob" "$name" || return 1
   custody_release "$name"
