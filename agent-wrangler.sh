@@ -867,6 +867,16 @@ start_vm() {
       log "  post-bounce verify: $vm unreachable over ssh — proceeding, watch for ghost agent"
     fi
   fi
+  # Re-stage the CURRENT login into the bounced guest + record custody
+  # (2026-08-07): `cont up` boots whatever login the last provision left
+  # on the disk — stale tokens the guest replays (doomed refresh, wiped
+  # blob, unauthenticated job) — and without a custody record every
+  # host-side refresher contends for whatever login it does hold.
+  if ./cont stage "$vm" >>"$LOG" 2>&1; then
+    log "  staged current login into $vm (custody recorded)"
+  else
+    log "  WARNING: cont stage failed for $vm — guest may ride stale creds"
+  fi
   mark_started "$vm"
   # Custody hop: $vm now rides the selected login and will rotate its
   # refresh token in-guest on any job that outlives the ~1h access token.

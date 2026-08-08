@@ -694,6 +694,108 @@ cmd_harvest() {
   adopt_blob_for "$dir" "$blob" "$name" || true
 }
 
+# Re-stage the SELECTED login's credential into a RUNNING VM and record
+# custody. This is the bounce path's missing half (found 2026-08-07):
+# `cont up` on an existing agent disk boots whatever login the LAST
+# provision left there — stale tokens the guest replays (doomed refresh →
+# wiped blob → job runs unauthenticated) — and with no custody record,
+# every host-side refresher believes that login is free while the guest
+# contends for it. The wrangler calls this after every bounce. Guest-side
+# install mirrors provisionAgent.sh's credential section exactly (clean
+# delete+add for the ACL, partition list for non-Apple-signed binaries,
+# file mirror, rc token export).
+cmd_stage() {
+  require_name "${1:-}"
+  local name="$1"
+  vm_running "$name" || { echo "stage: $name not running — boot it first" >&2; return 1; }
+  ensure_sshpass
+  # Refresh the staged copies from the selected login's live store so the
+  # guest gets the CURRENT lineage tip, not whatever was staged last.
+  local fresh
+  if fresh="$(read_claude_token_from_keychain 2>/dev/null)"; then
+    save_claude_token "$fresh"
+  fi
+  save_claude_credentials_blob >/dev/null 2>&1 || true
+  save_claude_account_blob >/dev/null 2>&1 || true
+  if [[ ! -f "$CLAUDE_CREDS_FILE" ]]; then
+    echo "stage: no credential blob for the selected login — nothing to ship" >&2
+    return 1
+  fi
+  local ip; ip="$(tart ip "$name" --wait 30)"
+  local -a ssh_opts=(
+    -o StrictHostKeyChecking=no
+    -o UserKnownHostsFile=/dev/null
+    -o LogLevel=ERROR
+    -o PreferredAuthentications=password
+    -o PubkeyAuthentication=no
+    -o ConnectTimeout=8
+    -o ServerAliveInterval=5
+    -o ServerAliveCountMax=2
+  )
+  local stage; stage="$(mktemp -d)"
+  trap "rm -rf '$stage'" RETURN
+  cp "$CLAUDE_CREDS_FILE" "$stage/cont-claude-credentials.json"
+  [[ -f "$CLAUDE_TOKEN_FILE" ]]   && cp "$CLAUDE_TOKEN_FILE"   "$stage/cont-claude-token"
+  [[ -f "$CLAUDE_ACCOUNT_FILE" ]] && cp "$CLAUDE_ACCOUNT_FILE" "$stage/cont-claude-account.json"
+  cat > "$stage/cont-stage-install.sh" <<'EOS'
+#!/bin/bash
+set -euo pipefail
+CREDS_FILE="/tmp/cont-claude-credentials.json"
+ACCOUNT_FILE="/tmp/cont-claude-account.json"
+TOKEN_FILE="/tmp/cont-claude-token"
+[[ -f "$CREDS_FILE" ]] || { echo "stage-install: no creds file shipped" >&2; exit 1; }
+CREDS_JSON="$(cat "$CREDS_FILE")"
+security unlock-keychain -p "admin" "$HOME/Library/Keychains/login.keychain-db" 2>/dev/null || true
+security delete-generic-password -s "Claude Code-credentials" -a "$USER" \
+  "$HOME/Library/Keychains/login.keychain-db" >/dev/null 2>&1 || true
+security add-generic-password -A -s "Claude Code-credentials" -a "$USER" \
+  -w "$CREDS_JSON" "$HOME/Library/Keychains/login.keychain-db"
+security set-generic-password-partition-list -S "apple-tool:,apple:,teamid:" \
+  -k "admin" -s "Claude Code-credentials" -a "$USER" \
+  "$HOME/Library/Keychains/login.keychain-db" >/dev/null
+mkdir -p "$HOME/.claude"
+printf '%s' "$CREDS_JSON" > "$HOME/.claude/.credentials.json"
+chmod 600 "$HOME/.claude/.credentials.json"
+if [[ -f "$ACCOUNT_FILE" ]]; then
+  python3 - "$ACCOUNT_FILE" "$HOME/.claude.json" <<'PY'
+import json, os, sys
+src, dst = sys.argv[1:]
+patch = json.load(open(src))
+base = json.load(open(dst)) if os.path.exists(dst) else {}
+base.update(patch)
+os.umask(0o077)
+with open(dst, "w") as f:
+    json.dump(base, f, indent=2)
+os.chmod(dst, 0o600)
+PY
+fi
+if [[ -f "$TOKEN_FILE" ]]; then
+  TOKEN="$(tr -d '[:space:]' < "$TOKEN_FILE")"
+  for rc in "$HOME/.zshrc" "$HOME/.zprofile"; do
+    [[ -f "$rc" ]] || continue
+    /usr/bin/sed -i '' '/CLAUDE_CODE_OAUTH_TOKEN=/d' "$rc"
+    printf 'export CLAUDE_CODE_OAUTH_TOKEN=%q\n' "$TOKEN" >> "$rc"
+  done
+fi
+rm -f "$CREDS_FILE" "$ACCOUNT_FILE" "$TOKEN_FILE"
+echo "stage-install: credential installed"
+EOS
+  if ! tar cf - -C "$stage" . \
+      | timeout 30 sshpass -p "$SSH_PASS" ssh "${ssh_opts[@]}" "$SSH_USER@$ip" \
+          "cd /tmp && tar xf - --no-same-owner 2>/dev/null; true"; then
+    echo "stage: transfer to $name failed" >&2; return 1
+  fi
+  if ! timeout 30 sshpass -p "$SSH_PASS" ssh "${ssh_opts[@]}" "$SSH_USER@$ip" \
+      "bash /tmp/cont-stage-install.sh"; then
+    echo "stage: guest install failed in $name" >&2; return 1
+  fi
+  # This VM now rides the selected login: all host-side refresh paths skip
+  # it until cmd_down harvests (or keepalive reclaims) + releases.
+  local sdir; sdir="$(claude_src_dir)"
+  ( umask 077; printf '%s' "$sdir" > "$VM_ACCOUNTS_DIR/$name" )
+  echo "stage: $name now rides '$(basename "${sdir:-default}")' (custody recorded)"
+}
+
 # Recover a login stranded inside a STOPPED custody VM (the guest rotated
 # the refresh token mid-job and then halted itself — the wrangler's idle
 # stop and the auditor agents' end-of-job self-shutdown both do this — so
@@ -865,7 +967,7 @@ account_switch() {  # $1 = config dir ("" = default)
 account_auto() {
   local min="${CONT_MIN_HEADROOM:-15}"
   local excl=",${CONT_EXCLUDE_ACCOUNTS:-},"
-  local cur best_dir="" best_hr="-1" d out hr name
+  local cur best_dir="" best_hr="-1" def_hr="" d out hr name
   cur="$(claude_src_dir)"
   while IFS= read -r d; do
     [[ "$d" == "-" ]] && d=""
@@ -877,11 +979,26 @@ account_auto() {
     account_in_custody "$d" && continue
     out="$(account_headroom_fresh "$d" 2>/dev/null)" || continue
     hr="${out%% *}"
+    # `default` is the human's PERSONAL ~/.claude — last resort only. With
+    # a thin roster (2 live harness logins + 2 VMs in custody, 2026-08-07)
+    # the plain most-headroom pick landed the FLEET on it, staging the
+    # human's credential into VMs and burning their 5h window — the exact
+    # thing the accounts layer exists to prevent.
+    if [[ -z "$d" ]]; then def_hr="$hr"; continue; fi
     if awk -v a="$hr" -v b="$best_hr" 'BEGIN{exit !(a>b)}'; then
       best_hr="$hr"; best_dir="$d"
     fi
   done < <(account_roster)
-  awk -v h="$best_hr" -v m="$min" 'BEGIN{exit !(h>=m)}' || return 1
+  if ! awk -v h="$best_hr" -v m="$min" 'BEGIN{exit !(h>=m)}'; then
+    # No harness login usable — fall back to default iff IT clears the bar.
+    if [[ -n "$def_hr" ]] \
+        && awk -v h="$def_hr" -v m="$min" 'BEGIN{exit !(h>=m)}'; then
+      best_dir=""
+      echo "account auto: no harness login has ≥${min}% headroom — falling back to the PERSONAL default login" >&2
+    else
+      return 1
+    fi
+  fi
   [[ "$best_dir" == "$cur" ]] && return 1
   account_switch "$best_dir" >&2 || return 1
   claude_src_name
@@ -1309,6 +1426,10 @@ cont — programmatic macOS-on-macOS environments via tart
   cont reclaim <name>         recover a login stranded in a STOPPED custody
                               VM: boot, grab the blob, stop immediately,
                               adopt; runs automatically from keepalive/rm
+  cont stage <name>           re-stage the SELECTED login's credential into
+                              a RUNNING VM + record custody; the wrangler
+                              runs it after every bounce (`cont up` on an
+                              existing agent disk boots stale creds)
   cont list                   list all VMs and their status
   cont status                 show base + list
   cont up <name>              clone base -> name (if missing) and boot
@@ -1337,6 +1458,7 @@ main() {
     auth)     cmd_auth "$@" ;;
     account)  cmd_account "$@" ;;
     harvest)  cmd_harvest "$@" ;;
+    stage)    cmd_stage "$@" ;;
     reclaim)  require_name "${1:-}"; reclaim_vm "$1" ;;
     list|ls)  cmd_list ;;
     status)   cmd_status ;;
