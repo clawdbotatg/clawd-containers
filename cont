@@ -613,7 +613,11 @@ grab_vm_blob() {  # $1 = vm name; prints the guest's credential blob.
   # ServerAlive + outer timeout: ConnectTimeout only covers the TCP
   # connect — a guest that halts mid-session (auditor agents self-halt)
   # otherwise leaves this ssh hung forever, wedging reclaim/keepalive.
-  out="$(timeout 25 sshpass -p "$SSH_PASS" ssh \
+  # -n: stdin from /dev/null. Without it, the FIRST successful in-loop grab
+  # slurps the caller's stdin — keepalive's roster while-read died right
+  # after the first connected reclaim (2026-08-07), silently skipping every
+  # login after it. Same class as the "claude -p eats stdin" trap.
+  out="$(timeout 25 sshpass -p "$SSH_PASS" ssh -n \
       -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
       -o LogLevel=ERROR -o ConnectTimeout=8 \
       -o ServerAliveInterval=5 -o ServerAliveCountMax=2 "$SSH_USER@$ip" \
@@ -785,7 +789,7 @@ EOS
           "cd /tmp && tar xf - --no-same-owner 2>/dev/null; true"; then
     echo "stage: transfer to $name failed" >&2; return 1
   fi
-  if ! timeout 30 sshpass -p "$SSH_PASS" ssh "${ssh_opts[@]}" "$SSH_USER@$ip" \
+  if ! timeout 30 sshpass -p "$SSH_PASS" ssh -n "${ssh_opts[@]}" "$SSH_USER@$ip" \
       "bash /tmp/cont-stage-install.sh"; then
     echo "stage: guest install failed in $name" >&2; return 1
   fi
@@ -867,11 +871,48 @@ sys.exit(0 if (o.get("accessToken") or o.get("refreshToken")) else 1)' 2>/dev/nu
 # expired) refreshes via a real claude ping — advancing the refresh-token
 # lineage so idle logins never rot. DEAD → Telegram (creds sourced from
 # .env.notify beside this script), deduped to one alert per login per day.
+# Anthropic hard-expires every OAuth refresh-token family 28 DAYS after
+# /login — the blob's refreshTokenExpiresAt says exactly when, to the
+# minute (sub4's 2026-08-07 16:57Z death matched the field EXACTLY).
+# NOTHING extends it: not rotation, not real-client pings, not live usage
+# (austinmax ran busy sessions for weeks and its deadline stayed frozen at
+# its last /login + 28d). Keeping tokens fresh is necessary but not
+# sufficient — the ONLY cure is a re-login before the horizon, so warn
+# loudly while there is still time to do it calmly.
+family_deadline_warn() {  # $1 = name, $2 = config dir
+  local exp
+  # `|| true`: under pipefail a login with NO credential (clawd) fails the
+  # read half of this pipeline, and the failed assignment would set-e-kill
+  # the whole script mid-roster (2026-08-07: keepalive silently stopped
+  # after the second login and never checked the rest).
+  exp="$(read_claude_blob_for "$2" 2>/dev/null | python3 -c '
+import json, sys
+try:
+    o = json.load(sys.stdin)["claudeAiOauth"]
+    if o.get("refreshToken") and o.get("refreshTokenExpiresAt"):
+        print(int(o["refreshTokenExpiresAt"]))
+except Exception:
+    pass' 2>/dev/null)" || true
+  [[ -n "$exp" ]] || return 0
+  local now left human
+  now="$(date +%s)"
+  left=$(( exp / 1000 - now ))
+  (( left > 0 && left < 5 * 86400 )) || return 0
+  human="$(date -r $(( exp / 1000 )) '+%a %b %e %H:%M')"
+  echo "SOON $1 — refresh-token family hard-expires $human (in $(( left / 3600 ))h); /login before then"
+  keepalive_notify "family-$1" \
+    "🟡 Claude login '$1' hard-expires $human (~$(( left / 3600 ))h left) — Anthropic's 28-day refresh-family limit, nothing on-box can extend it. Re-login BEFORE then: CLAUDE_CONFIG_DIR=~/.clawd-accounts/$1 claude /login"
+}
+
 account_keepalive() {
   local d name out vm dead=0
   while IFS= read -r d; do
     [[ "$d" == "-" ]] && d=""
     if [[ -z "$d" ]]; then name="default"; else name="$(basename "$d")"; fi
+    # Deadline warning runs for EVERY login with a credential — including
+    # ones skipped below for custody/live-claude: austinmax was busy with
+    # live sessions (always SKIPped) while 4 days from its hard wall.
+    family_deadline_warn "$name" "$d"
     if account_in_custody "$d"; then
       echo "SKIP $name — in custody of a running VM"
       continue
