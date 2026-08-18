@@ -61,6 +61,7 @@ AGENTS=(
 )
 
 INTERVAL="${1:-60}"
+WRANGLER_ARGV=("$@")            # kept for self_update's re-exec
 LOG="${LOG:-/tmp/agent-wrangler.log}"
 
 # Soft time cap per VM. If a VM has been running longer than this, the
@@ -961,6 +962,66 @@ needs_skills_refresh() {
   return 1
 }
 
+# ── Self-update ─────────────────────────────────────────────────────────
+# This repo had NO auto-pull, unlike clawd-harness. So a fix landed on the
+# box it was written on and every other box kept running the old code for
+# as long as nobody remembered to ssh in. That is not hypothetical: a
+# scope-gate bug counted a single linked .sol file as its entire repo and
+# auto-declined + REFUNDED five good audit jobs from one client (633, 634,
+# 635, 641, 643). Fixing it on one machine left two others still refunding,
+# and one of those had no working ssh route at all.
+#
+# Same guards the harness uses (docs/fleet/DEPLOY.md): on main, clean
+# worktree, fast-forward only. A dirty tree means someone is live-editing —
+# skip it, never clobber. A diverged branch (local commits never pushed —
+# clawd-sat had five) fails the ff-only pull and is left alone for a human.
+SELF_UPDATE="${SELF_UPDATE:-1}"
+SELF_UPDATE_EVERY="${SELF_UPDATE_EVERY:-300}"
+
+self_update() {
+  [[ "$SELF_UPDATE" == "1" ]] || return 0
+  local stamp="$STATE_DIR/self-update.at" now last
+  now=$(date +%s); last=$(cat "$stamp" 2>/dev/null || echo 0)
+  (( now - last < SELF_UPDATE_EVERY )) && return 0
+  echo "$now" > "$stamp"
+
+  local branch; branch="$(git rev-parse --abbrev-ref HEAD 2>/dev/null)" || return 0
+  if [[ "$branch" != "main" ]]; then
+    log "self-update: on '$branch', not main — skipping"; return 0
+  fi
+  if [[ -n "$(git status --porcelain 2>/dev/null)" ]]; then
+    log "self-update: worktree dirty — skipping (someone is live-editing)"; return 0
+  fi
+
+  local before after
+  before="$(git rev-parse HEAD 2>/dev/null)" || return 0
+  # Never let git block on a credential dialog on an unattended box.
+  if ! GIT_TERMINAL_PROMPT=0 GIT_ASKPASS=/bin/echo \
+       git -c credential.helper='!gh auth git-credential' \
+           pull --ff-only -q origin main >>"$LOG" 2>&1; then
+    log "self-update: ff-only pull failed (diverged or offline) — staying on ${before:0:8}"
+    return 0
+  fi
+  after="$(git rev-parse HEAD 2>/dev/null)"
+  [[ "$before" == "$after" ]] && return 0
+
+  log "self-update: ${before:0:8} -> ${after:0:8} ($(git log --oneline -1 | cut -c1-70))"
+  notify "⬆️ wrangler self-updated: $(git log --oneline -1 | cut -c1-60)"
+  # Cached scope verdicts were produced by the OLD gate — drop them, or a
+  # stale too_complex keeps refunding jobs the new gate would accept.
+  rm -f "$HOME/.cache/leftclaw-complexity"/*.out 2>/dev/null || true
+  # Helper scripts are re-read every tick, so they are already live. This
+  # file is not — re-exec so the new loop takes over. Running VMs are
+  # separate tart processes and survive; all state lives in $STATE_DIR.
+  if ! git diff --quiet "$before" "$after" -- agent-wrangler.sh; then
+    log "self-update: agent-wrangler.sh itself changed — re-exec"
+    # bash 3.2 (what launchd's bare PATH finds at /bin/bash) treats an
+    # empty array expansion as an unbound variable under `set -u`, so a
+    # wrangler started with no args would die here instead of re-exec'ing.
+    exec "$0" ${WRANGLER_ARGV[@]+"${WRANGLER_ARGV[@]}"}
+  fi
+}
+
 refresh_skills() {
   if needs_skills_refresh; then
     log "skills stale or missing — running ./refresh-skills.sh (this may take ~30s)"
@@ -981,6 +1042,7 @@ for entry in "${AGENTS[@]}"; do
 done
 
 while :; do
+  self_update
   refresh_skills
 
   # Health gate: if the host can't authenticate to Anthropic, no VM we
