@@ -84,10 +84,11 @@ cont reset dev                   # spec re-applied automatically
 ## Deploy = `git push` (the wrangler pulls itself)
 
 `agent-wrangler.sh` self-updates every 5 minutes (`self_update`, added
-2026-08-17): on main + clean worktree + fast-forward only, it pulls, drops
-the cached scope verdicts in `~/.cache/leftclaw-complexity/`, and re-execs
-itself if `agent-wrangler.sh` changed. Helper scripts (`scripts/**`) are
-re-read every tick, so they go live on the pull with no restart.
+2026-08-17): on main + no tracked modifications + fast-forward only, it
+pulls, drops the cached scope verdicts in `~/.cache/leftclaw-complexity/`,
+and re-execs itself if `agent-wrangler.sh` changed. Helper scripts
+(`scripts/**`) are re-read every tick, so they go live on the pull with no
+restart.
 
 **So pushing to main IS the deploy** — for all three wrangler boxes
 (**clawd-head, clawd-sat, clawd-leftclaw**), not just the one you are
@@ -95,9 +96,13 @@ typing on.
 
 Two traps, both silent:
 
-- **A dirty worktree stops updates on that box.** It is skipped on purpose
-  (never clobber a live edit), but a stray untracked file left behind means
-  that machine quietly runs old code forever. Leave the tree clean.
+- **An edit to a TRACKED file stops updates on that box.** Skipped on
+  purpose — never clobber a live edit — but a modification left behind
+  means that machine quietly runs old code forever. `git status` before you
+  walk away. (Untracked files are fine and do **not** block: the first cut
+  of this counted them, and clawd-head sat out every update for a whole
+  morning over two stray `.md` notes. An untracked file that would really
+  be clobbered is still safe — `--ff-only` refuses that case itself.)
 - **A diverged branch stops them too.** `--ff-only` refuses local commits
   that were never pushed; clawd-sat had accumulated five. Push your work,
   don't let it sit on one box.
@@ -105,6 +110,9 @@ Two traps, both silent:
 `SELF_UPDATE=0` opts a box out. This exists because it wasn't there: a
 scope-gate bug auto-declined and **refunded five good audit jobs** from one
 client, and fixing it on one machine left the other two still refunding.
+The full incident, how the gate measures, and its calibration set live in
+**[`SCOPE-GATE.md`](SCOPE-GATE.md)** — read that before touching
+`scripts/audit/complexity-check.sh`.
 
 **No ssh route to clawd-sat / clawd-leftclaw from clawd-head** (their
 `.local` names don't resolve off-LAN). Drive them through the fleet

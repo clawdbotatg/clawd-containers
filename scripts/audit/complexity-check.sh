@@ -52,6 +52,9 @@
 # ~/.cache/leftclaw-complexity/ — the wrangler re-runs this every tick and
 # the measurement involves network calls.
 #
+# Background, the 2026-08-17 five-refund incident, and the calibration set
+# to re-run after ANY change here: ../../SCOPE-GATE.md
+#
 # Usage:  complexity-check.sh <job_id>   (needs ALCHEMY_API_KEY in env)
 # Output (stdout, parseable):
 #   VERDICT: ok|too_complex

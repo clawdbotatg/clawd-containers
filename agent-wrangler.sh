@@ -1003,8 +1003,16 @@ self_update() {
   if [[ "$branch" != "main" ]]; then
     log "self-update: on '$branch', not main — skipping"; return 0
   fi
-  if [[ -n "$(git status --porcelain 2>/dev/null)" ]]; then
-    log "self-update: worktree dirty — skipping (someone is live-editing)"; return 0
+  # TRACKED changes only. Untracked files are normal debris on these boxes —
+  # agents leave plan/scratch .md files lying around — and counting them as
+  # "someone is live-editing" wedges the box permanently: clawd-head sat out
+  # every update for a whole morning over two stray notes, which is the exact
+  # silent-staleness this function exists to prevent. An untracked file that
+  # would genuinely be clobbered is still safe, because `pull --ff-only`
+  # refuses that case itself ("untracked working tree files would be
+  # overwritten") and changes nothing — we just log it and try again next tick.
+  if [[ -n "$(git status --porcelain --untracked-files=no 2>/dev/null)" ]]; then
+    log "self-update: tracked files modified — skipping (someone is live-editing)"; return 0
   fi
 
   local before after
