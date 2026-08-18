@@ -8,6 +8,13 @@ took the blame and were innocent — they were idle. The cost was the harness's
 own account router evacuating every session at once, plus an audit depth phase
 that fanned out 12 agents simultaneously.
 
+> **Read `CLAUDE.md` → "Subscription burn: throttle the RATE, never the coverage"
+> alongside this.** Another agent worked the same incident from the VM side and
+> landed that section (`1f05c83`). The two are complementary, not duplicates:
+> that one explains the audit fan-out and the custody hop; this one explains the
+> harness-side handoff stampede, the account/dir mapping, and the pending
+> rename. Where they overlap they agree.
+
 ---
 
 ## 0. How to check the fleet in one command
@@ -282,9 +289,19 @@ instead of restart — that is the change that makes strike 2 not cost double.
 
 ## 6. Reaching the other machines
 
-Three fleet machines: **clawd-head** (this box), **clawd-leftclaw**,
-**clawd-heart**. Found via the relay's journal on `zkllmapi`
-(`journalctl -u clawd-fleet-relay | grep -oE 'clawd-[a-z]+'`).
+Fleet machines seen on the relay over 3 days (`ssh zkllmapi`,
+`journalctl -u clawd-fleet-relay | grep -oE 'clawd-[a-z]+'`): **clawd-head**
+(this box, 235 hits), **clawd-leftclaw** (116), **clawd-heart** (4).
+
+> **Naming discrepancy — unresolved.** `CLAUDE.md` names the three wrangler
+> boxes clawd-head / **clawd-sat** / clawd-leftclaw. `clawd-sat` never appears
+> in the relay journal and `clawd-heart` is not in CLAUDE.md. One of them was
+> probably renamed. Confirm before you rely on either name.
+
+**Account dirs are per-machine.** `~/.clawd-accounts/` on this box holds
+`austinmax, clawd, ef, slop, sub4`. Other boxes have different sets (the other
+agent's writeup references a `sub5` that does not exist here). Never assume a
+dir name means the same plan on another machine — check the org.
 
 **There is no ssh route to leftclaw/heart from head** — their `.local` names
 don't resolve off-LAN, and `buck`/`officebox` in `~/.ssh/config` time out.
@@ -305,11 +322,17 @@ on-chain job state as ground truth for what a box is doing.
       `[accounts] handoff budget:` in the harness log the next time a plan walls.
 - [ ] Weekly windows: `clawd`/`austingriffith` and `clawd@buidlguidl` were both
       at 98%. `ef` is the healthy pool (resets Aug 25).
+- [ ] **The custody hop is headroom-blind — likely the remaining root bug.**
+      The wrangler's *usage* gate (`cont account auto`) picks by headroom, but
+      the custody hop that fires when a VM boots riding the selected login does
+      **not**. On 08-18 that chain (dead selected login → dead `austinmax` →
+      hop to `default`) put two concurrent auditors on the personal + EF plans
+      while a healthy pool idled. Credit: the other agent's CLAUDE.md writeup;
+      I did not find this one. Fix the hop to consult headroom.
 - [ ] **VM credential contention**: both auditor VMs booted with
       `WARNING: cont stage failed — guest may ride stale creds` and
       `custody hop unavailable — shared custody, refresh contention possible`.
-      Same family as §2. Most likely how the duplicate dirs died. Another agent
-      has commits in this area — sync before changing it.
+      Same family as §2, and the trigger for the headroom-blind hop above.
 - [ ] `clawd-leftclaw` relay flapping (§6).
 - [ ] Job 629 escrow is frozen forever unless the client cancels.
 
