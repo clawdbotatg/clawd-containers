@@ -137,6 +137,19 @@ SCOPE_RE = re.compile(
 )
 CHAIN_RE = re.compile(r'chain\s*_?id\W{0,4}(\d{1,10})', re.IGNORECASE)
 NO_GITHUB_RE = re.compile(r"do\s+not\s+use\s+(?:the\s+)?github", re.IGNORECASE)
+# Clients also ship source as a bare file rather than a repo or an address:
+# an IPFS CID (job 672) or a raw.githubusercontent.com file URL (jobs 629,
+# 647). Neither matches ADDR_RE or REPO_RE, so the gate used to measure
+# TARGETS: 0 / LOC: 0 and fail open on every one of them.
+CID_RE = re.compile(r"\b(?:Qm[1-9A-HJ-NP-Za-km-z]{44}|ba[a-z2-7]{50,})\b")
+# any direct http(s) link to a .sol file; github.com blob/tree links are
+# excluded because REPO_RE already claims those (double-count guard)
+SRCURL_RE = re.compile(r"https?://[^\s)\]}>\"\']+\.sol\b", re.IGNORECASE)
+IPFS_GATEWAYS = (
+    "https://gateway.pinata.cloud/ipfs/{cid}",
+    "https://{cid}.ipfs.community.bgipfs.com/",
+    "https://ipfs.io/ipfs/{cid}",
+)
 LIB_NAME_RE = re.compile(r"openzeppelin|forge-std|solady|solmate", re.IGNORECASE)
 SECTION_RE = re.compile(
     r"^\s*(?:abstract\s+contract|contract|library|interface)\s+[A-Za-z_]",
@@ -164,6 +177,30 @@ if not addrs and not NO_GITHUB_RE.search(desc):
         r = "https://" + re.sub(r"^(?:https?://)?(?:www\.)?", "", rm.group(0).rstrip("/."))
         if r.lower() not in seen_r:
             seen_r.add(r.lower()); repos.append(r)
+
+# Direct source: raw .sol URLs and IPFS CIDs. Same gating as repos — only
+# when no addresses were found (an address plus its source would double
+# count) — and the same negation-window check.
+direct_urls, direct_cids = [], []
+if not addrs:
+    seen_d = set()
+    for sm in SRCURL_RE.finditer(desc):
+        u = sm.group(0).rstrip(".,;)")
+        if re.match(r"https?://(?:www\.)?github\.com/", u, re.IGNORECASE):
+            continue                      # REPO_RE owns these
+        window = desc[max(0, sm.start() - 120):sm.end() + 120]
+        if NEGATION_RE.search(window):
+            continue
+        if u.lower() not in seen_d:
+            seen_d.add(u.lower()); direct_urls.append(u)
+    seen_c = set()
+    for cm2 in CID_RE.finditer(desc):
+        c = cm2.group(0)
+        window = desc[max(0, cm2.start() - 120):cm2.end() + 120]
+        if NEGATION_RE.search(window):
+            continue
+        if c not in seen_c:
+            seen_c.add(c); direct_cids.append(c)
 
 # Specific .sol files named in the description narrow a repo's scope to
 # just those files ("audit X.sol and Y.sol in github.com/o/r") — the rest
@@ -297,12 +334,49 @@ for r in repos:
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
-total = verified_loc + est_loc + repo_loc
-targets = len(addrs) + len(repos)
+# ── direct source files (raw URLs + IPFS CIDs) ─────────────────────────
+direct_loc = 0
+n_direct = 0
+
+def fetch_text(url, timeout=30, cap=8_000_000):
+    req = urllib.request.Request(url, headers={"User-Agent": "leftclaw-scope-gate"})
+    with urllib.request.urlopen(req, timeout=timeout) as r:
+        return r.read(cap).decode("utf-8", errors="replace")
+
+def looks_solidity(t):
+    return bool(re.search(r"pragma\s+solidity|^\s*(?:abstract\s+contract|contract|library|interface)\s+[A-Za-z_]",
+                          t, re.MULTILINE))
+
+for u in direct_urls:
+    try:
+        t = fetch_text(u)
+        if looks_solidity(t):
+            direct_loc += count_sol(t); n_direct += 1
+        else:
+            unmeasured += 1
+    except Exception:
+        unmeasured += 1
+
+for c in direct_cids:
+    got = False
+    for g in IPFS_GATEWAYS:
+        try:
+            t = fetch_text(g.format(cid=c))
+        except Exception:
+            continue
+        if looks_solidity(t):
+            direct_loc += count_sol(t); n_direct += 1; got = True
+        break                              # gateway answered; don't re-fetch
+    if not got:
+        unmeasured += 1
+
+total = verified_loc + est_loc + repo_loc + direct_loc
+targets = len(addrs) + len(repos) + len(direct_urls) + len(direct_cids)
 detail = []
 if verified_loc: detail.append(f"{verified_loc} verified-source LoC ({n_verified} contracts)")
 if est_loc:      detail.append(f"~{est_loc} LoC est. from bytecode ({n_estimated} contracts)")
 if repo_loc:     detail.append(f"{repo_loc} repo LoC ({len(repos)} repos)")
+if direct_loc:   detail.append(f"{direct_loc} direct-source LoC ({n_direct} files)")
 if unmeasured:   detail.append(f"{unmeasured} target(s) unmeasurable, counted as 0")
 detail = "; ".join(detail) or "nothing measurable"
 
