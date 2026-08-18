@@ -420,22 +420,28 @@ for a in addrs:
 for r in repos:
     tmp = tempfile.mkdtemp(prefix="scope-gate-")
     try:
-        env = dict(os.environ, GIT_TERMINAL_PROMPT="0")
+        # A private-or-deleted client repo must fail in a second, not hang.
+        # GIT_TERMINAL_PROMPT=0 alone is not enough on macOS: git still calls
+        # the osxkeychain credential helper, which pops a GUI dialog and
+        # blocks the gate for ~2 minutes (job 440). Disable the helper and
+        # neuter askpass so an unreachable repo just errors out.
+        env = dict(os.environ, GIT_TERMINAL_PROMPT="0", GIT_ASKPASS="/bin/echo",
+                   GIT_CONFIG_NOSYSTEM="1")
+        NOPROMPT = ["-c", "core.hooksPath=/dev/null", "-c", "credential.helper="]
         subprocess.run(
-            ["git", "-c", "core.hooksPath=/dev/null", "clone", "--depth", "1",
+            ["git", *NOPROMPT, "clone", "--depth", "1",
              "--no-tags", "--single-branch", r, tmp],
             capture_output=True, timeout=120, env=env, check=True)
         # Move to the pinned ref if the client named one and it resolves.
         for ref in pinned_refs:
             fetched = subprocess.run(
-                ["git", "-c", "core.hooksPath=/dev/null", "-C", tmp, "fetch",
+                ["git", *NOPROMPT, "-C", tmp, "fetch",
                  "--depth", "1", "--no-tags", "origin", ref],
                 capture_output=True, timeout=45, env=env)
             if fetched.returncode != 0:
                 continue
             subprocess.run(
-                ["git", "-c", "core.hooksPath=/dev/null", "-C", tmp,
-                 "checkout", "-q", "FETCH_HEAD"],
+                ["git", *NOPROMPT, "-C", tmp, "checkout", "-q", "FETCH_HEAD"],
                 capture_output=True, timeout=60, env=env)
             break
         SKIP_DIRS = {"lib", "node_modules", ".git", "test", "tests",
