@@ -76,6 +76,36 @@ cont reset dev                   # spec re-applied automatically
     stale copy dies. Refresh only via a real `claude -p` ping under that account's
     `CLAUDE_CONFIG_DIR` (`claude_ping_dir`), never a hand-rolled token call.
 
+## Deploy = `git push` (the wrangler pulls itself)
+
+`agent-wrangler.sh` self-updates every 5 minutes (`self_update`, added
+2026-08-17): on main + clean worktree + fast-forward only, it pulls, drops
+the cached scope verdicts in `~/.cache/leftclaw-complexity/`, and re-execs
+itself if `agent-wrangler.sh` changed. Helper scripts (`scripts/**`) are
+re-read every tick, so they go live on the pull with no restart.
+
+**So pushing to main IS the deploy** — for all three wrangler boxes
+(**clawd-head, clawd-sat, clawd-leftclaw**), not just the one you are
+typing on.
+
+Two traps, both silent:
+
+- **A dirty worktree stops updates on that box.** It is skipped on purpose
+  (never clobber a live edit), but a stray untracked file left behind means
+  that machine quietly runs old code forever. Leave the tree clean.
+- **A diverged branch stops them too.** `--ff-only` refuses local commits
+  that were never pushed; clawd-sat had accumulated five. Push your work,
+  don't let it sit on one box.
+
+`SELF_UPDATE=0` opts a box out. This exists because it wasn't there: a
+scope-gate bug auto-declined and **refunded five good audit jobs** from one
+client, and fixing it on one machine left the other two still refunding.
+
+**No ssh route to clawd-sat / clawd-leftclaw from clawd-head** (their
+`.local` names don't resolve off-LAN). Drive them through the fleet
+controller instead: `ssh zkllmapi`, POST `/api/tool` on `127.0.0.1:8799`
+with `spawn` (`pid` `"self"` — a stable pid on every harness), then `ask`.
+
 ## Why `cont open` exists (Tahoe quirk)
 
 On macOS 26.x + tart 2.32.x, plain `tart run <name>` boots the VM but **never renders a window**. `cont open` works around it by running with `--vnc-experimental` and pointing Screen Sharing.app at the VNC URL tart prints. Don't try `tart run` directly for GUI work on this host — use `cont open`. Re-evaluate after tart ≥ 2.33.
