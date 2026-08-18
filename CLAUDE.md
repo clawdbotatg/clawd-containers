@@ -67,6 +67,11 @@ cont reset dev                   # spec re-applied automatically
 - **Wrapper state:** `~/.config/cont/`
   - `base` — current base image for `up`/`reset`
   - `specs/<name>.conf` — per-VM cpu/memory/display/disk; reapplied via `tart set` on stopped VMs
+  - `max-vms` — optional per-box override of the wrangler's `MAX_VMS`, re-read at
+    every slot check (`effective_max_vms`, commit f3192fe) so parallelism can be
+    turned down on a LIVE wrangler without a restart (a restart kills running
+    VMs). Bare number; `rm` it to fall back to the launchd env (this box exports
+    `MAX_VMS=2` in the plist).
   - `claude-source` — config dir of the selected Claude login (empty/missing = default
     `~/.claude`); all token reads/refreshes/staging follow it. The agent-wrangler's usage
     gate runs `cont account auto` when the current login's window exhausts, hopping the
@@ -105,6 +110,50 @@ client, and fixing it on one machine left the other two still refunding.
 `.local` names don't resolve off-LAN). Drive them through the fleet
 controller instead: `ssh zkllmapi`, POST `/api/tool` on `127.0.0.1:8799`
 with `spawn` (`pid` `"self"` — a stable pid on every harness), then `ask`.
+
+## Subscription burn: throttle the RATE, never the coverage (2026-08-18)
+
+An audit's cost has two axes, and only one of them is ever the problem. The
+2026-08-18 incident ("something is burning the entire subscription in
+minutes") and its wrong-then-right fix are the reference:
+
+**What burns.** The live orchestrator (`skills/two-phase-audit-v2.md`,
+run by `auditor.prompt.md`) fans phase 2 into **12 pashov attack agents,
+each with a full copy of the source in its bundle** — historically all 12
+spawned at once. 12 concurrent contexts drain a login's 5h window in
+minutes; the rolling window then frees a sliver, the audit instantly eats
+it back, and from outside the plan looks permanently pinned at 0%.
+
+**The wrong fix (do not redo it).** Consolidating 12 agents → 4
+(commit 20e67c0) was reverted in 6f4b56c. The 12 independent perspectives
+ARE the deliverable clients pay for — cutting coverage to fix a
+scheduling problem degrades the product. When asked to "turn down the
+parallelism", the levers are **concurrency, model tier, and account
+routing — never agent count**.
+
+**The right fix (live).** Commit 07db430: v2's Turn 2 override spawns the
+same 12 agents in **waves of 3**, each wave completing before the next.
+Total tokens and coverage unchanged; burst burn capped; depth-phase
+wall-clock ~3×. v3 inherits it ("v2's overrides apply verbatim"). Skills
+scp into the VM from this working tree at **every boot** (`cont sync` →
+`provisionAuditorAgent.sh`), so a skill edit reaches the next audit with
+no gold rebake and no wrangler restart — but never the audit already
+running (its skill copy is inside the VM).
+
+**How the burn landed on the wrong plan.** The wrangler's *usage* gate
+(`cont account auto`) picks by headroom — but the **custody hop does
+not**: when a VM boots riding the selected login, the host selection hops
+to another dir to avoid refresh contention, headroom-blind. On 08-18 that
+chain (dead selected login → dead austinmax → custody hop to `default` =
+austin.griffith@ethereum.org's PERSONAL plan) put two concurrent auditors
+on personal + EF plans while sub5 idled at 100%. Custody-hop-ignores-
+headroom is the remaining root bug if this recurs.
+
+**Observability gap (open).** The fan-out is invisible from the host: the
+wrangler log says only "auditor up, leaving alone", and the usage endpoint
+gives coarse window percentages. First symptom is a window at 100%. Run
+`bash scripts/fleet-health.sh` for triage; a per-VM claude-process count
+(via `cont ssh`) would make the burn visible early and is not built yet.
 
 ## Why `cont open` exists (Tahoe quirk)
 
