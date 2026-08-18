@@ -113,6 +113,20 @@ BACKOFF_RESET_SECONDS="${BACKOFF_RESET_SECONDS:-1800}"
 # MAX_VMS=2 if your host confirms it can run two.
 MAX_VMS="${MAX_VMS:-1}"
 
+# Runtime override for MAX_VMS, re-read at every slot check so a human can
+# turn parallelism down (or back up) on a live wrangler without a restart —
+# a restart kills the running VMs. Write a bare number into the file
+# (e.g. `echo 1 > ~/.config/cont/max-vms`); remove it to fall back to the
+# MAX_VMS env. Lives in ~/.config/cont so it survives reboots, and is
+# per-box on purpose: a push deploys code to every wrangler box, but each
+# host's VM budget is its own.
+MAX_VMS_FILE="${MAX_VMS_FILE:-$HOME/.config/cont/max-vms}"
+effective_max_vms() {
+  local v
+  v=$(cat "$MAX_VMS_FILE" 2>/dev/null | tr -cd '0-9')
+  if [[ -n "$v" ]]; then echo "$v"; else echo "$MAX_VMS"; fi
+}
+
 # Per-VM consecutive start_vm() failure counter. Reset on a successful
 # start or when the queue becomes empty. Stored as "<vm> <count>" lines
 # in a flat file (bash 3.2 on macOS lacks associative arrays).
@@ -1263,10 +1277,11 @@ while :; do
           log "$vm: backing off — ${fails} consecutive start failures (retry in ≤${BACKOFF_RESET_SECONDS}s, or when queue empties)"
         else
           # Check VM slot availability BEFORE attempting to boot.
-          # Skip the boot when MAX_VMS is hit instead of consuming a retry.
+          # Skip the boot when the cap is hit instead of consuming a retry.
+          _cap=$(effective_max_vms)
           _running=$(tart list 2>/dev/null | awk '/running/{n++} END{print n+0}')
-          if (( _running >= MAX_VMS )); then
-            log "$vm: no VM slot available (${_running}/${MAX_VMS} running) — skipping this tick"
+          if (( _running >= _cap )); then
+            log "$vm: no VM slot available (${_running}/${_cap} running) — skipping this tick"
             continue
           fi
           if [[ "$mine" =~ ^[1-9] ]]; then
