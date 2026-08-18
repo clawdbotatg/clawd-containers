@@ -347,11 +347,22 @@ def count_sol(text):
         if not chunk:
             continue
         body = "\n".join(chunk)
-        # header comments live at the TAIL of the previous chunk (right
-        # above the decl); check the last few lines of the preceding chunk
-        # plus the decl line itself for a library attribution
-        prev_tail = "\n".join(lines[max(0, bounds[i] - 8):bounds[i]])
-        header_zone = prev_tail + "\n" + chunk[0]
+        # A library's attribution comment sits immediately above its decl, so
+        # walk back over ONLY the contiguous comment/blank lines and stop at
+        # the first line of real code. The old blind 8-line window bled the
+        # PREVIOUS section's attribution onto this one: in a flat file whose
+        # vendored section is short, the client's own contract right below it
+        # was dropped, under-counting real scope — the direction that gets an
+        # oversized job ACCEPTED, which locks its escrow forever. Guarded by
+        # tests/test_scope_gate.py ("header-comment attribution").
+        k = bounds[i]
+        while k > 0:
+            prev = lines[k - 1].strip()
+            if prev == "" or prev.startswith(("//", "/*", "*", "*/")):
+                k -= 1
+            else:
+                break
+        header_zone = "\n".join(lines[k:bounds[i]]) + "\n" + chunk[0]
         if i > 0 and LIB_NAME_RE.search(header_zone):
             continue
         dm = DECL_NAME_RE.match(chunk[0])

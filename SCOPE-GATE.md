@@ -85,7 +85,9 @@ and measurement costs network calls.
 flattened file), shipped as a GitHub blob URL pinned to commit
 `bb9ffbf8`. We declined it **36 seconds after it was posted** — 18 blocks,
 creation `50040368` → decline `50040386`, tx
-`0xe6c3a90d…1734404` from our own wallet `0xd98728b9…`.
+`0xe6c3a90d…1734404`, sent by one of our own worker wallets — not a
+competitor. (Which wallet is on which box is in the private fleet
+memory, not here; see §6.)
 
 **The mechanism, in order:**
 
@@ -145,7 +147,24 @@ default branch.
 
 ---
 
-## 5. How to test it — the calibration set
+## 5. How to test it
+
+### First: `python3 tests/test_scope_gate.py`
+
+Offline, ~1s, no network and no clone. It extracts the real embedded Python out
+of the shell script and runs it against tiny checked-in `.sol` fixtures, so it
+cannot drift from the shipped code. It pins target discovery (a blob URL is one
+file, not its repo) and line counting (vendored OZ dropped; a *project*
+contract named like a library still counted; cross-file dedup; fail-open on an
+unreachable target; the budget boundary itself).
+
+**Run it after any change here.** It found a real under-counting bug the day it
+was written — see §8.
+
+### Then: the live calibration set
+
+Slower, network-bound, and it rots — but it is the only thing that checks the
+gate against real client descriptions.
 
 **Run the whole set once, at the end.** Do not re-run it after each
 increment; it is network-bound and one bad repo used to hang for minutes.
@@ -194,61 +213,23 @@ it hangs, the no-prompt git flags in §7 regressed.
 
 ## 6. Fleet topology — three boxes, and two of them have no ssh
 
-The wrangler runs on **clawd-head, clawd-sat, clawd-leftclaw**. Those are
-the only machines with `clawd-containers` on disk (clawd-gut, clawd-heart
-and clawd-antenna were checked and do not have it).
+The wrangler runs on **clawd-head, clawd-sat, clawd-leftclaw**. Those are the
+only machines with `clawd-containers` on disk (clawd-gut, clawd-heart and
+clawd-antenna were checked and do not have it). That matters for §7: a push to
+main has to reach all three.
 
-| wallet | box | file |
-|---|---|---|
-| `0xEE8f4Bf7…377c` | clawd-head | `.env.auditor` (+ builder/research/feature/frontend-qa) |
-| `0xDB5465EA…0f6C` | clawd-head | `.env.auditor2` |
-| `0xB2109c9C…21AD` | clawd-leftclaw | `.env.auditor` (+ the others) |
-| `0x8F5d03C5…5359` | clawd-leftclaw | `.env.auditor2` |
-| `0xd98728b9…636a` | clawd-sat | `.env.auditor` (inferred: it declined 586/600/633/641/643/658 and sat is the third box) |
-| `0x024771c8…6be4` | **unknown** | possibly a genuine third party |
+**clawd-sat and clawd-leftclaw have no ssh route from clawd-head** — their
+`.local` mDNS names do not resolve off-LAN. There *is* a way to drive them
+(the fleet controller exposes a tool API on the relay box, and it can spawn and
+prompt a session on any connected machine), and there is a stable project id
+that works even on a box with no sessions.
 
-**`clawd-sat` and `clawd-leftclaw` have no ssh route from clawd-head** —
-their `.local` mDNS names do not resolve off-LAN. Drive them through the
-fleet controller instead:
-
-```bash
-# 1. who is online, and which boxes have the repo
-ssh zkllmapi 'curl -s http://127.0.0.1:8799/api/world' | python3 -c "import sys,json
-d=json.load(sys.stdin)
-for m in d['machines']:
-    ep=m.get('empty_projects',[])+[p['name'] for p in m.get('projects',[])]
-    print(m['id'], m.get('connected'), 'clawd-containers' in ep)"
-
-# 2. spawn a session.  pid 'self' is a STABLE pid on every harness — use it.
-ssh zkllmapi "curl -s -X POST http://127.0.0.1:8799/api/tool \
-  -H 'Content-Type: application/json' \
-  -d '{\"name\":\"spawn\",\"args\":{\"machine\":\"clawd-sat\",\"pid\":\"self\",\"confirm\":true}}'"
-
-# 3. drive it (write the JSON to a file and --data-binary it; quoting is brutal)
-#    {"name":"ask","args":{"machine":"…","cid":"…","text":"…","confirm":true}}
-
-# 4. read what it did — NOT the digest, see §7
-ssh zkllmapi "curl -s -X POST http://127.0.0.1:8799/api/tool \
-  -H 'Content-Type: application/json' \
-  -d '{\"name\":\"transcript_tail\",\"args\":{\"machine\":\"clawd-sat\",\"cid\":\"…\",\"n\":6}}'"
-```
-
-Why `pid: "self"`: the world API omits pids for projects with no sessions,
-so a quiet box exposes **no pid you could spawn into**. The harness always
-injects itself as the pinned project `self`, so that one always works.
-
-**Restarting a wrangler** (only needed to bootstrap a change to
-`agent-wrangler.sh` itself on a box still running the pre-`self_update`
-copy):
-
-```bash
-launchctl kickstart -k gui/$(id -u)/com.leftclaw.wrangler
-```
-
-Use `kickstart -k` only. Never `bootout` / `disable` / `unload` — a
-disabled job stays dead silently and that box stops taking jobs entirely.
-
----
+**The step-by-step runbook, and the map of which worker wallet lives on which
+box, are deliberately NOT in this file — this repo is public.** They live in the
+private fleet memory; ask Austin if you need them. The wallet map in particular
+should stay private: the marketplace wallets are pseudonymous, and publishing
+which box owns which one tells anyone reading that a single operator runs all of
+them.
 
 ## 7. Traps, all of them found the hard way
 
@@ -309,10 +290,16 @@ something.
   "too complex, please resubmit smaller" that was factually wrong. Nothing
   has been sent to correct it. The jobs are closed, so there is no thread to
   post into — it would need a new channel.
-- **The gate has no unit tests.** Its only regression suite is the live job
-  set in §5, which depends on client repos staying reachable. Jobs 586/621
-  already return different LoC than when first measured. A fixture-based
-  test (checked-in `.sol` samples → expected counts) would not rot.
+- ~~The gate has no unit tests.~~ **Fixed** — `tests/test_scope_gate.py`
+  (§5). Writing it immediately caught a real bug: the header-comment
+  attribution check used a blind 8-line window above each section, so a short
+  vendored section's "OpenZeppelin" comment bled onto the **next** section and
+  dropped it. That under-counts, which is the dangerous direction — an
+  oversized job gets ACCEPTED and its escrow is locked forever. Job 641 was
+  measuring **13** LoC for a contract its own client described as 116 lines;
+  it now measures 100. Fixed by walking back over only the contiguous
+  comment/blank lines and stopping at the first line of code.
+  The live set still rots, so prefer adding a fixture over adding a job id.
 - **`count_sol` under-counts flattened OZ** when the flattener strips
   attribution headers *and* the contract is not in `KNOWN_LIB_DECLS`. The
   name list is maintenance debt; treat a surprising `too_complex` on a

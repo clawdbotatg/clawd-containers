@@ -120,9 +120,15 @@ The full incident, how the gate measures, and its calibration set live in
 `scripts/audit/complexity-check.sh`.
 
 **No ssh route to clawd-sat / clawd-leftclaw from clawd-head** (their
-`.local` names don't resolve off-LAN). Drive them through the fleet
-controller instead: `ssh zkllmapi`, POST `/api/tool` on `127.0.0.1:8799`
-with `spawn` (`pid` `"self"` — a stable pid on every harness), then `ask`.
+`.local` names don't resolve off-LAN). They can still be driven, through the
+fleet controller's tool API on the relay box. The runbook is deliberately not
+written down here — **this repo is public** — it's in the private fleet memory;
+ask Austin.
+
+**Before changing `scripts/audit/complexity-check.sh`, run
+`python3 tests/test_scope_gate.py`** (offline, ~1s). That gate refunds paying
+clients unattended; the suite pins both directions — over-counting refunds a
+good job, under-counting accepts one we can't finish and locks its escrow.
 
 ## Subscription burn: throttle the RATE, never the coverage (2026-08-18)
 
