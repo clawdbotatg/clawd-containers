@@ -46,15 +46,38 @@ if [[ -s "$STATE/cap_strikes.txt" ]]; then
   done < "$STATE/cap_strikes.txt"
 else ok "no cap strikes"; fi
 
-hdr "account usage"
+hdr "account usage (grouped by SUBSCRIPTION, not by directory)"
+# A config dir is not a subscription. One login can hold seats in several
+# orgs, and the same org can be signed in under several dirs -- and the ORG
+# is the usage pool. Reporting per-dir invents subscriptions you do not have
+# (7 dirs, 4 real plans) and hides that two "accounts" share one wall.
+# Worse, duplicate dirs on one org are a FORKED CREDENTIAL STORE: OAuth
+# refresh rotates the refresh token, so whichever dir refreshes last kills
+# the others. That is what "LOGGED OUT" almost always means here.
 probe="$HARNESS/tools/usage_probe.py"
+declare -a POOL_OF=()
 if [[ -r "$probe" ]]; then
+  python3 - <<'IDPY'
+import json,os,glob,collections
+pools=collections.defaultdict(list)
+for d in sorted(glob.glob(os.path.expanduser("~/.clawd-accounts/*/"))):
+    n=os.path.basename(d.rstrip("/"))
+    try:
+        a=(json.load(open(os.path.join(d,".claude.json"))).get("oauthAccount") or {})
+        pools[(a.get("organizationName") or "?", a.get("organizationUuid") or "?")].append(n)
+    except Exception:
+        pools[("unreadable","?")].append(n)
+print("  %d directories -> %d subscription(s)" % (sum(len(v) for v in pools.values()), len(pools)))
+for (name,uuid),dirs in sorted(pools.items()):
+    dup = "  <-- %d dirs share this ONE plan; duplicates kill each other's token" % len(dirs) if len(dirs)>1 else ""
+    print("    %-38s %s%s" % (name[:38], ",".join(dirs), dup))
+IDPY
   for d in "$HOME"/.clawd-accounts/*/; do
     d="${d%/}"                      # probe rejects a trailing slash
     a=$(basename "$d")
     out=$(python3 "$probe" "$d" 2>&1)
     if grep -qE "no accessToken|no credentials found" <<<"$out"; then
-      flag "$a — LOGGED OUT (needs re-sign-in)"; continue; fi
+      flag "$a — LOGGED OUT (if a dir above shares its plan, DELETE this one; re-signing in just re-forks the store)"; continue; fi
     if grep -q "429" <<<"$out"; then ok "$a — rate-limited, could not read"; continue; fi
     pct() { awk -v pat="$1" '$0 ~ pat {match($0,/[0-9.]+%/);
               if (RSTART) { printf "%d", substr($0,RSTART,RLENGTH-1)+0; exit }}' <<<"$out"; }
