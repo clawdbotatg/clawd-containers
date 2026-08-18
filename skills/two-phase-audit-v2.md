@@ -49,11 +49,10 @@ Same as v1:
 
 ## Cost floor (know before you run)
 
-The agent count is fixed (3 context + up-to-8 checklist + 4 consolidated attack =
-~15 sub-agents); only the model scales with scope. So even a tiny target pays the full
+The methodology's agent *count* is fixed (3 context + up-to-8 checklist + 12 attack =
+~23 sub-agents); only the model scales with scope. So even a tiny target pays the full
 fan-out. A ~470-LOC job measured ~200k output tokens and ~23 min wall-clock in staging,
-most of it the depth phase — which is why the 12 pashov attack agents were consolidated
-to 4 (three lenses each; see Turn 2) on 2026-08-18, after a fleet burn incident. That's fine for a paid audit but is a real
+most of it the fixed 12-agent depth phase. That's fine for a paid audit but is a real
 per-job increase over v1 (which had no Phase 0). On a subscription-routed fleet, weigh
 this against weekly-window capacity before promoting v2 as the default for *every* job —
 it may be worth reserving v2 for higher-value jobs and keeping v1 for trivial ones.
@@ -76,7 +75,7 @@ In one message:
    `large`; LOC is the cost driver, not file count — a handful of small contracts is
    still a small job.) Default `{agent_model}` for phases 1 & 2:
    small → `sonnet`, large → `opus`. Agent *count* never scales — the methodology is
-   the 3 context + 6 checklist + 4 consolidated attack agents; only the model scales.
+   the 3 context + 6 checklist + 12 attack agents; only the model scales.
 5. **Model selection — once, here.** Same rules as v1 (interactive → pashov Turn 1b
    picker; autonomous/headless → `{scope}` default silently; no-`model`-param runtimes
    → leave unset). `{agent_model}` applies to phases 1 & 2.
@@ -137,22 +136,8 @@ Do not start Turn 2 until `phase1-report.md` exists.
 Execute `skills/pashov-auditor.md` Turns 1–4 **with these overrides**:
 
 - **Skip its Turn 1b** (model question) — `{agent_model}` already chosen.
-- **Consolidated fan-out (2026-08-18): 4 attack agents, not 12.** Build FOUR
-  bundles instead of pashov's twelve — each = `source.md` + SOP +
-  **three** specialty files + `shared-rules.md`:
-  - `agent-1-bundle.md`: math-precision + invariant + boundary
-  - `agent-2-bundle.md`: access-control + economic-security + asymmetry
-  - `agent-3-bundle.md`: execution-trace + periphery + first-principles
-  - `agent-4-bundle.md`: numerical-gap + trust-gap + flow-gap (gap-hunter prompt)
-  Spawn 4 parallel background agents (specialty prompt for 1–3, gap-hunter
-  prompt for 4), each instructed to hunt **all three** of its lenses and to
-  label every finding with which lens produced it. Everything downstream
-  (Turn 3b wait, Turn 4 dedup/gates, `[phase2: agent N]` tags) treats these
-  as the full agent set. Why: each pashov bundle carries a full copy of the
-  source — 12 bundles = 12 source reads per audit, and the depth phase
-  dominated real-run token burn. Same 12 lenses, a third of the input cost.
-- **Blind to phase-1 FINDINGS:** pass **no phase-1 output** into the attack agents.
-- **Inject the map, NOT the findings:** the attack agents receive `{map_body}` as
+- **Blind to phase-1 FINDINGS:** pass **no phase-1 output** into the 12 agents.
+- **Inject the map, NOT the findings:** the 12 attack agents receive `{map_body}` as
   structural context (same framing as Turn 1) in addition to their bundle. The map
   contains no findings, so blindness is preserved — and the documented invariants +
   fragility clusters are exactly what an attacker-mindset agent wants: concrete

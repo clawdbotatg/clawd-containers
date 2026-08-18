@@ -153,11 +153,10 @@ Do not start Turn 2 until `phase1-report.md` exists.
 
 ### Turn 2 — Phase 2: depth (pashov), blind
 
-**v2's overrides apply verbatim** (skip its Turn 1b; consolidated 4-agent fan-out —
-3 lenses per bundle, NOT pashov's 12; blind to phase-1 findings;
+**v2's overrides apply verbatim** (skip its Turn 1b; blind to phase-1 findings;
 inject `{map_body}`; output → `{audit_dir}/phase2-report.md`), plus:
 
-- **Inject `{xray_invariants}` into the attack agents (NEW in v3)**, framed as:
+- **Inject `{xray_invariants}` into the 12 attack agents (NEW in v3)**, framed as:
   *"Invariant catalog from a mechanical pre-scan. These are CANDIDATES, not
   findings: each inferred row cites a derivation — try to falsify it. On-chain=No
   rows are properties the code does not fully enforce — verify whether the gap is

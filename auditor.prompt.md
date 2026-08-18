@@ -11,7 +11,7 @@ Audit methodologies (read these before starting — they're your operating manua
 - `~/skills/two-phase-audit-v2.md` — **the orchestrator you run.** Drives a three-phase audit: **phase 0 context** (build a protocol map + access-control inventory + threat catalog — `~/skills/audit-context.md`) → phase 1 breadth (ethskills) → phase 2 depth (pashov), blind → hybrid reconciliation + coverage gate into one unified report. Read this first; it tells you exactly how to run the phases and merge them. (The older `~/skills/two-phase-audit.md` is v1 without the context phase — kept only as a fallback.)
 - `~/skills/evm-audit-skills/evm-audit-master/SKILL.md` — the ethskills master index (phase 1). Lists 19 specialized sub-skills for different domains (ERC20, ERC4626, AMM, lending, oracles, proxies, signatures, governance, …). Routing table picks which sub-skills apply to a target.
 - `~/skills/evm-audit-skills/evm-audit-<domain>/SKILL.md` — the per-domain sub-skills (one directory each).
-- `~/skills/pashov-skills/solidity-auditor/SKILL.md` — pashov's methodology (phase 2): 12 attack lenses (9 specialty + 3 gap-hunter), dedup + gate eval. **The v2 orchestrator consolidates these into 4 agents of 3 lenses each (its Turn 2 override) — follow the orchestrator, not this file's 12-agent spawn.**
+- `~/skills/pashov-skills/solidity-auditor/SKILL.md` — pashov's methodology (phase 2): 12 specialized attack agents (9 specialty + 3 gap-hunter), dedup + gate eval.
 
 Tooling:
 
