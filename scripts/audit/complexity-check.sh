@@ -22,6 +22,8 @@
 #     addresses: counting both double-counts; jobs 422/430), and never
 #     when the description says "do not use GitHub" (job 427 ships its
 #     source out-of-band and marks the GitHub link as an anti-target)
+#   - a GitHub *blob* URL is ONE FILE, not its repo (job 643): it names a
+#     path at a pinned ref, so it is fetched raw and counted alone
 #
 # Per-target LoC:
 #   - address, Sourcify-verified → exact LoC of the verified sources
@@ -142,9 +144,21 @@ NO_GITHUB_RE = re.compile(r"do\s+not\s+use\s+(?:the\s+)?github", re.IGNORECASE)
 # 647). Neither matches ADDR_RE or REPO_RE, so the gate used to measure
 # TARGETS: 0 / LOC: 0 and fail open on every one of them.
 CID_RE = re.compile(r"\b(?:Qm[1-9A-HJ-NP-Za-km-z]{44}|ba[a-z2-7]{50,})\b")
-# any direct http(s) link to a .sol file; github.com blob/tree links are
-# excluded because REPO_RE already claims those (double-count guard)
+# any direct http(s) link to a .sol file; github.com blob links are handled
+# by BLOB_RE below (double-count guard)
 SRCURL_RE = re.compile(r"https?://[^\s)\]}>\"\']+\.sol\b", re.IGNORECASE)
+# A github blob URL names ONE FILE at ONE REF — it is not a request to audit
+# the whole repo. Job 643 shipped a single 100-line contract as a blob link
+# into a 55-file repo; REPO_RE claimed it, the named-file narrowing missed
+# (the pinned commit is not the default-branch tip, so the path does not
+# exist in a shallow clone) and the gate silently fell back to "whole repo"
+# — 11,028 LoC, auto-declined + refunded 36s after posting. Blob links are
+# now resolved to raw.githubusercontent.com and counted as one file.
+BLOB_RE = re.compile(
+    r"https?://(?:www\.)?github\.com/([A-Za-z0-9-]+)/([A-Za-z0-9._-]+)"
+    r"/blob/([^\s/]+)/([^\s)\]}>\"\']+\.sol)\b",
+    re.IGNORECASE,
+)
 IPFS_GATEWAYS = (
     "https://gateway.pinata.cloud/ipfs/{cid}",
     "https://{cid}.ipfs.community.bgipfs.com/",
@@ -154,6 +168,56 @@ LIB_NAME_RE = re.compile(r"openzeppelin|forge-std|solady|solmate", re.IGNORECASE
 SECTION_RE = re.compile(
     r"^\s*(?:abstract\s+contract|contract|library|interface)\s+[A-Za-z_]",
 )
+DECL_NAME_RE = re.compile(
+    r"^\s*(?:abstract\s+contract|contract|library|interface)\s+([A-Za-z_][A-Za-z0-9_]*)",
+)
+# The header-comment test above only fires when the flattener preserved a
+# per-section attribution comment. Many don't: in job 633's flat file OZ's
+# `Math` was dropped but `SafeCast` (1,106 lines), `SafeERC20`, `ERC20` and
+# `AccessControl` were all counted as project code, and the job was declined
+# at 11k LoC when its real target is under 1k. So also drop a section whose
+# DECLARED NAME is a well-known dependency primitive nobody is paying us to
+# audit. Deliberately one-directional: it can only lower the count, and the
+# last section of a file is never dropped (a flattener emits the target
+# last, so a project contract that happens to share a name is safe).
+KNOWN_LIB_DECLS = {
+    # OpenZeppelin — access / lifecycle
+    "ownable", "ownable2step", "accesscontrol", "accesscontrolenumerable",
+    "accesscontroldefaultadminrules", "accessmanaged", "accessmanager",
+    "pausable", "initializable", "reentrancyguard", "reentrancyguardtransient",
+    "nonces", "context", "multicall",
+    # OpenZeppelin — tokens
+    "erc20", "erc20permit", "erc20burnable", "erc20pausable", "erc20votes",
+    "erc20wrapper", "erc20flashmint", "erc4626", "erc721", "erc721enumerable",
+    "erc721uristorage", "erc721holder", "erc1155", "erc1155holder",
+    "erc1155supply", "safeerc20", "erc165", "erc165checker", "erc2981",
+    # OpenZeppelin — utils / math
+    "math", "signedmath", "safecast", "safemath", "arrays", "strings",
+    "shortstrings", "bytes", "storageslot", "transientslot", "slotderivation",
+    "address", "create2", "clones", "panic", "comparators", "memory",
+    "lowlevelcall", "enumerableset", "enumerablemap", "doubleendedqueue",
+    "checkpoints", "circularbuffer", "heap", "time", "errors",
+    "merkleproof", "ecdsa", "eip712", "messagehashutils", "signaturechecker",
+    "shortstringsupgradeable", "structuredlinkedlist",
+    # OpenZeppelin — proxy / upgrades
+    "proxy", "erc1967proxy", "erc1967utils", "uupsupgradeable",
+    "transparentupgradeableproxy", "proxyadmin", "beaconproxy",
+    "upgradeablebeacon",
+    # Uniswap v3 periphery/core math, near-universal in vault strategies
+    "fullmath", "tickmath", "liquidityamounts", "fixedpoint96",
+    "fixedpoint128", "sqrtpricemath", "bitmath", "unsafemath",
+    "lowgassafemath", "transferhelper", "pooladdress", "callbackvalidation",
+    "oraclelibrary", "positionkey", "path",
+    # solady / solmate
+    "fixedpointmathlib", "safetransferlib", "libstring", "libbit",
+    "merkleprooflib", "signaturecheckerlib", "libclone", "weth",
+}
+# every IERCxxx / IERCxxxYyy standard interface
+STD_IFACE_RE = re.compile(r"^ierc\d+", re.IGNORECASE)
+
+def is_known_lib(name):
+    n = name.lower()
+    return n in KNOWN_LIB_DECLS or bool(STD_IFACE_RE.match(n))
 
 m = SCOPE_RE.search(desc)
 scope_text = desc[m.end():] if m else desc
@@ -167,10 +231,30 @@ for a in ADDR_RE.findall(scope_text):
 # github …") — checked in a window around each URL match.
 NEGATION_RE = re.compile(r"private|do\s*not|don'?t|reject|ignore|legacy|avoid",
                          re.IGNORECASE)
+# Blob URLs first: each one claims its own span, so the REPO_RE match that
+# sits inside it (the owner/repo prefix) is not also counted as a repo.
+blob_urls, blob_spans = [], []
+if not addrs and not NO_GITHUB_RE.search(desc):
+    seen_b = set()
+    for bm in BLOB_RE.finditer(desc):
+        blob_spans.append((bm.start(), bm.end()))
+        window = desc[max(0, bm.start() - 120):bm.end() + 120]
+        if NEGATION_RE.search(window):
+            continue
+        owner, repo, ref, path = bm.groups()
+        raw = f"https://raw.githubusercontent.com/{owner}/{repo}/{ref}/{path}"
+        if raw.lower() not in seen_b:
+            seen_b.add(raw.lower()); blob_urls.append(raw)
+
+def in_blob(pos):
+    return any(a <= pos < b for a, b in blob_spans)
+
 repos = []
 if not addrs and not NO_GITHUB_RE.search(desc):
     seen_r = set()
     for rm in REPO_RE.finditer(desc):
+        if in_blob(rm.start()):
+            continue                      # BLOB_RE owns this URL
         window = desc[max(0, rm.start() - 120):rm.end() + 120]
         if NEGATION_RE.search(window):
             continue
@@ -193,6 +277,9 @@ if not addrs:
             continue
         if u.lower() not in seen_d:
             seen_d.add(u.lower()); direct_urls.append(u)
+    for b in blob_urls:                   # resolved github blob -> raw file
+        if b.lower() not in seen_d:
+            seen_d.add(b.lower()); direct_urls.append(b)
     seen_c = set()
     for cm2 in CID_RE.finditer(desc):
         c = cm2.group(0)
@@ -207,6 +294,33 @@ if not addrs:
 # of the repo is context, not scope.
 named_sols = {f.lower() for f in re.findall(r"([A-Za-z0-9_.-]+\.sol)\b", desc)
               if not f.endswith((".t.sol", ".s.sol"))}
+
+# Clients pin the package they want audited — a `/tree/<ref>/` URL (job 621)
+# or a bare commit SHA in the prose (jobs 633/635/643). A shallow clone lands
+# on the DEFAULT BRANCH, where the pinned paths often do not exist, so the
+# named-file narrowing below silently found nothing and fell back to "the
+# whole repo is the scope". Fetch the pinned ref when we can name one.
+# A branch name may itself contain slashes (job 621's ref is
+# `audit2/round9-batched-20260814`), and nothing in the URL says where the
+# ref ends and the path begins — so offer the first few path prefixes as
+# candidates and let the remote decide. Bounded: at most MAX_REF_TRIES
+# candidates, short timeout, any failure just leaves the default branch.
+MAX_REF_TRIES = 4
+TREE_TAIL_RE = re.compile(
+    r"github\.com/[A-Za-z0-9-]+/[A-Za-z0-9._-]+/(?:tree|blob)/([^\s)\]}>\"\']+)",
+    re.IGNORECASE)
+SHA_RE = re.compile(r"\b([0-9a-f]{40})\b", re.IGNORECASE)
+pinned_refs = []
+def add_ref(r):
+    if r and r not in pinned_refs:
+        pinned_refs.append(r)
+for mm in SHA_RE.finditer(desc):        # an explicit SHA is the strongest pin
+    add_ref(mm.group(1))
+for mm in TREE_TAIL_RE.finditer(desc):
+    parts = mm.group(1).split("/")
+    for k in range(1, min(len(parts), 3) + 1):
+        add_ref("/".join(parts[:k]))
+pinned_refs = pinned_refs[:MAX_REF_TRIES]
 
 cm = CHAIN_RE.search(desc)
 stated_chain = cm.group(1) if cm else None
@@ -236,6 +350,10 @@ def count_sol(text):
         prev_tail = "\n".join(lines[max(0, bounds[i] - 8):bounds[i]])
         header_zone = prev_tail + "\n" + chunk[0]
         if i > 0 and LIB_NAME_RE.search(header_zone):
+            continue
+        dm = DECL_NAME_RE.match(chunk[0])
+        is_last = (i == len(bounds) - 2)
+        if i > 0 and not is_last and dm and is_known_lib(dm.group(1)):
             continue
         key = hashlib.sha256(body.strip().encode()).hexdigest()
         if key in seen_sections:
@@ -307,6 +425,19 @@ for r in repos:
             ["git", "-c", "core.hooksPath=/dev/null", "clone", "--depth", "1",
              "--no-tags", "--single-branch", r, tmp],
             capture_output=True, timeout=120, env=env, check=True)
+        # Move to the pinned ref if the client named one and it resolves.
+        for ref in pinned_refs:
+            fetched = subprocess.run(
+                ["git", "-c", "core.hooksPath=/dev/null", "-C", tmp, "fetch",
+                 "--depth", "1", "--no-tags", "origin", ref],
+                capture_output=True, timeout=45, env=env)
+            if fetched.returncode != 0:
+                continue
+            subprocess.run(
+                ["git", "-c", "core.hooksPath=/dev/null", "-C", tmp,
+                 "checkout", "-q", "FETCH_HEAD"],
+                capture_output=True, timeout=60, env=env)
+            break
         SKIP_DIRS = {"lib", "node_modules", ".git", "test", "tests",
                      "script", "scripts", "mock", "mocks", "dependencies"}
         candidates = []
