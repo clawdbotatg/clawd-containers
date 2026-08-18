@@ -153,7 +153,8 @@ Do not start Turn 2 until `phase1-report.md` exists.
 
 ### Turn 2 — Phase 2: depth (pashov), blind
 
-**v2's overrides apply verbatim** (skip its Turn 1b; blind to phase-1 findings;
+**v2's overrides apply verbatim** (skip its Turn 1b; staggered spawn in waves of 3
+— all 12 agents, never all at once; blind to phase-1 findings;
 inject `{map_body}`; output → `{audit_dir}/phase2-report.md`), plus:
 
 - **Inject `{xray_invariants}` into the 12 attack agents (NEW in v3)**, framed as:

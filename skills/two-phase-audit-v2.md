@@ -52,7 +52,8 @@ Same as v1:
 The methodology's agent *count* is fixed (3 context + up-to-8 checklist + 12 attack =
 ~23 sub-agents); only the model scales with scope. So even a tiny target pays the full
 fan-out. A ~470-LOC job measured ~200k output tokens and ~23 min wall-clock in staging,
-most of it the fixed 12-agent depth phase. That's fine for a paid audit but is a real
+most of it the fixed 12-agent depth phase. Total cost is unchanged by the Turn 2
+staggered spawn (waves of 3) — that caps the burn *rate*, not the burn. That's fine for a paid audit but is a real
 per-job increase over v1 (which had no Phase 0). On a subscription-routed fleet, weigh
 this against weekly-window capacity before promoting v2 as the default for *every* job —
 it may be worth reserving v2 for higher-value jobs and keeping v1 for trivial ones.
@@ -136,6 +137,15 @@ Do not start Turn 2 until `phase1-report.md` exists.
 Execute `skills/pashov-auditor.md` Turns 1–4 **with these overrides**:
 
 - **Skip its Turn 1b** (model question) — `{agent_model}` already chosen.
+- **Staggered spawn (2026-08-18) — overrides pashov Turn 3a's "spawn all 12 at
+  once".** Build all 12 bundles and run all 12 agents exactly as the skill
+  specifies — full coverage, nothing cut — but spawn them in **waves of 3**
+  (agents 1–3, then 4–6, 7–9, 10–12), waiting for every agent in a wave to
+  notify completion before spawning the next wave. Blindness is unaffected:
+  agents never see each other's output in either scheme. Why: 12 concurrent
+  contexts drain a subscription's 5h usage window in minutes and starve every
+  other session on the plan; the same total tokens in 4 waves let the rolling
+  window breathe. Depth-phase wall-clock roughly triples — accepted trade.
 - **Blind to phase-1 FINDINGS:** pass **no phase-1 output** into the 12 agents.
 - **Inject the map, NOT the findings:** the 12 attack agents receive `{map_body}` as
   structural context (same framing as Turn 1) in addition to their bundle. The map
