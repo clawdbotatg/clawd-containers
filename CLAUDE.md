@@ -76,7 +76,12 @@ cont reset dev                   # spec re-applied automatically
     `~/.claude`); all token reads/refreshes/staging follow it. The agent-wrangler's usage
     gate runs `cont account auto` when the current login's window exhausts, hopping the
     fleet to the login with the most headroom instead of pausing (pause only when no
-    login has ≥15% headroom). Never fork a credential store (copy a blob under a second
+    login has ≥15% headroom). **The personal `default` login is never auto-selected**
+    (since b12dcf9; set `CONT_ALLOW_DEFAULT=1` to opt back in) — pausing with jobs
+    queued beats burning the human's own plan. A 429 from the usage endpoint is
+    surfaced as rate-limited (exit 4, one 20s retry in auto), NOT as a dead login —
+    it 429s readily under bursts of probes, and "rate-limited" in `account list`
+    means retry later, not re-login. Never fork a credential store (copy a blob under a second
     keychain service and refresh both) — OAuth refresh rotates the refresh token and the
     stale copy dies. Refresh only via a real `claude -p` ping under that account's
     `CLAUDE_CONFIG_DIR` (`claude_ping_dir`), never a hand-rolled token call.
@@ -154,8 +159,11 @@ not**: when a VM boots riding the selected login, the host selection hops
 to another dir to avoid refresh contention, headroom-blind. On 08-18 that
 chain (dead selected login → dead austinmax → custody hop to `default` =
 austin.griffith@ethereum.org's PERSONAL plan) put two concurrent auditors
-on personal + EF plans while sub5 idled at 100%. Custody-hop-ignores-
-headroom is the remaining root bug if this recurs.
+on personal + EF plans while sub5 idled at 100%. **Root cause fixed in
+b12dcf9:** the hop *does* go through `cont account auto`, but a 429 from
+the usage endpoint read healthy logins as dead, and the picker's
+last-resort fallback then handed out `default`. Now 429 = retry, and
+`default` is never auto-selected without `CONT_ALLOW_DEFAULT=1`.
 
 **Observability gap (open).** The fan-out is invisible from the host: the
 wrangler log says only "auditor up, leaving alone", and the usage endpoint
