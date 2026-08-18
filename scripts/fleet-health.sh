@@ -71,9 +71,15 @@ else flag "usage probe not found at $probe"; fi
 hdr "handoff stampede (the big subscription burner)"
 log="$HOME/Library/Logs/clawd-harness.log"
 if [[ -r "$log" ]]; then
-  n=$(tail -4000 "$log" | grep -c "plan drained")
-  (( n > 20 )) && flag "$n session handoffs in recent log — each one re-ingests a full context" \
-               || ok "$n recent handoffs"
+  # Count only since the CURRENT server started. The log is append-only across
+  # restarts, so a whole-file count keeps reporting a stampede that was already
+  # fixed — a check that always flags is a check nobody reads.
+  L=$(grep -n "tearing down + exiting" "$log" | tail -1 | cut -d: -f1)
+  n=$(tail -n +"${L:-1}" "$log" | grep -c "plan drained")
+  b=$(tail -n +"${L:-1}" "$log" | grep -c "handoff budget")
+  if   (( n > 20 )); then flag "$n handoffs since last restart — each re-ingests a full context"
+  elif (( n > 0 ));  then ok "$n handoff(s) since last restart${b:+, $b batched}"
+  else ok "no handoffs since last restart"; fi
 else ok "no harness log"; fi
 
 hdr "runaway host processes"
