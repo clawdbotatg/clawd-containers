@@ -493,7 +493,7 @@ account_headroom() {
   blob="$(read_claude_blob_for "$dir")" || return 1
   [[ -n "$blob" ]] || return 1
   printf '%s' "$blob" | python3 -c '
-import json, sys, time, urllib.request
+import json, sys, time, urllib.error, urllib.request
 try:
     o = json.load(sys.stdin)["claudeAiOauth"]
     tok = o.get("accessToken", "")
@@ -520,6 +520,8 @@ try:
     print(f"{100 - worst[0]:.1f} {worst[1]}")
 except SystemExit:
     raise
+except urllib.error.HTTPError as e:
+    sys.exit(4 if e.code == 429 else 1)  # 4 = rate-limited, NOT a dead login
 except Exception:
     sys.exit(1)
 '
@@ -532,7 +534,9 @@ account_headroom_fresh() {  # account_headroom + one refresh-and-retry
     claude_ping_dir "$dir" || true
     out="$(account_headroom "$dir")"; rc=$?
   fi
-  (( rc == 0 )) || return 1
+  # Propagate the code — 4 (endpoint rate-limited) must stay
+  # distinguishable from "no usable credential" for account_auto.
+  (( rc == 0 )) || return $rc
   printf '%s\n' "$out"
 }
 
@@ -1008,7 +1012,7 @@ account_switch() {  # $1 = config dir ("" = default)
 account_auto() {
   local min="${CONT_MIN_HEADROOM:-15}"
   local excl=",${CONT_EXCLUDE_ACCOUNTS:-},"
-  local cur best_dir="" best_hr="-1" def_hr="" d out hr name
+  local cur best_dir="" best_hr="-1" def_hr="" d out hr name rc
   cur="$(claude_src_dir)"
   while IFS= read -r d; do
     [[ "$d" == "-" ]] && d=""
@@ -1018,7 +1022,16 @@ account_auto() {
     # (CONT_EXCLUDE_ACCOUNTS=name1,name2).
     [[ "$excl" == *",$name,"* ]] && continue
     account_in_custody "$d" && continue
-    out="$(account_headroom_fresh "$d" 2>/dev/null)" || continue
+    rc=0; out="$(account_headroom_fresh "$d" 2>/dev/null)" || rc=$?
+    if (( rc == 4 )); then
+      # Endpoint rate-limited — the login may be perfectly healthy. On
+      # 2026-08-18 a burst of probes 429'd sub5 (100% headroom), auto
+      # read it as dead, and the fallback burned the personal plan.
+      sleep 20
+      out="$(account_headroom_fresh "$d" 2>/dev/null)" || continue
+    elif (( rc != 0 )); then
+      continue
+    fi
     hr="${out%% *}"
     # `default` is the human's PERSONAL ~/.claude — last resort only. With
     # a thin roster (2 live harness logins + 2 VMs in custody, 2026-08-07)
@@ -1031,12 +1044,17 @@ account_auto() {
     fi
   done < <(account_roster)
   if ! awk -v h="$best_hr" -v m="$min" 'BEGIN{exit !(h>=m)}'; then
-    # No harness login usable — fall back to default iff IT clears the bar.
-    if [[ -n "$def_hr" ]] \
+    # No harness login usable. `default` is the human's PERSONAL plan and
+    # is NEVER auto-selected unless explicitly opted in — on 2026-08-18
+    # this fallback fired (every harness login dead or 429'd) and the
+    # fleet burned the personal weekly window to 98%. Pausing with jobs
+    # queued is always better than that.
+    if [[ "${CONT_ALLOW_DEFAULT:-0}" == "1" ]] && [[ -n "$def_hr" ]] \
         && awk -v h="$def_hr" -v m="$min" 'BEGIN{exit !(h>=m)}'; then
       best_dir=""
-      echo "account auto: no harness login has ≥${min}% headroom — falling back to the PERSONAL default login" >&2
+      echo "account auto: no harness login has ≥${min}% headroom — CONT_ALLOW_DEFAULT=1, falling back to the PERSONAL default login" >&2
     else
+      [[ -n "$def_hr" ]] && echo "account auto: no harness login has ≥${min}% headroom; refusing the PERSONAL default login (set CONT_ALLOW_DEFAULT=1 to allow)" >&2
       return 1
     fi
   fi
@@ -1058,15 +1076,18 @@ cmd_account() {
     service) claude_keychain_service ;;
     blob)    read_claude_blob_for "$(claude_src_dir)" ;;
     list)
-      local d name cur out mark
+      local d name cur out mark rc
       cur="$(claude_src_dir)"
       while IFS= read -r d; do
         [[ "$d" == "-" ]] && d=""
         if [[ -z "$d" ]]; then name="default"; else name="$(basename "$d")"; fi
         mark=" "; [[ "$d" == "$cur" ]] && mark="*"
-        if out="$(account_headroom_fresh "$d" 2>/dev/null)"; then
+        rc=0; out="$(account_headroom_fresh "$d" 2>/dev/null)" || rc=$?
+        if (( rc == 0 )); then
           printf '%s %-10s headroom %s%%   worst window resets %s\n' \
             "$mark" "$name" "${out%% *}" "${out#* }"
+        elif (( rc == 4 )); then
+          printf '%s %-10s (usage endpoint rate-limited — login likely fine, retry later)\n' "$mark" "$name"
         else
           printf '%s %-10s (no usable credential)\n' "$mark" "$name"
         fi
