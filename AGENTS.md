@@ -2,6 +2,21 @@
 
 A Bash CLI (`cont`) wrapping `tart` for programmatic macOS-on-macOS VMs on Apple Silicon. Built for an agent (you) to bring up isolated mac environments, run things, snapshot, reset.
 
+> **This file is a stale July snapshot of `CLAUDE.md`.** `CLAUDE.md` is the
+> maintained one — read it first. Two things from it that a stale copy will
+> otherwise hide from you:
+>
+> 1. **Deploy is `git push` to main.** All three wrangler boxes (clawd-head,
+>    clawd-sat, clawd-leftclaw) pull themselves every 5 minutes. Leaving a
+>    *tracked* file modified silently freezes updates on that box; untracked
+>    files are fine. A diverged branch freezes them too.
+> 2. **Before editing `scripts/audit/complexity-check.sh`, read
+>    [`SCOPE-GATE.md`](SCOPE-GATE.md).** That gate refunds clients
+>    automatically. A false `too_complex` hands a paying client their money
+>    back in ~30 seconds, and a bug in it did exactly that to five jobs from
+>    one client on 2026-08-17. The doc carries the calibration set you must
+>    re-run after any change.
+
 ## Default to `cont`
 
 The wrapper is the interface. It encodes recipes you'd otherwise re-derive every session — the Tahoe VNC dance, the wait-for-ssh loop, sshpass with the right flags, spec persistence across reset, gold-image cloning. Default to `cont <verb>` for everything; reach for raw `tart` if it feels more natural to you, or for subcommands the wrapper doesn't expose.
