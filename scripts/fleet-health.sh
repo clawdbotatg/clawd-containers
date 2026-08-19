@@ -34,6 +34,25 @@ if [[ -z "$running" ]]; then ok "no VMs running (fleet idle)"; else
       msg="$vm up ${el}s / ${cap}s cap (${pct}%)"
       (( pct > 80 )) && flag "$msg — near cap, a kill here restarts from ZERO" || ok "$msg"
     else ok "$vm running (no start marker)"; fi
+    # In-guest claude-process count — the early burn signal. The 08-18
+    # incident was invisible from the host until a window hit 100%: the
+    # audit's phase-2 fans out 12 agents, and with the waves-of-3 stagger
+    # a healthy guest shows ~1 orchestrator + ≤3 agents. More than 5 means
+    # the fan-out is running unstaggered (or something is respawning) and
+    # a 5h window is about to drain in minutes.
+    ip=$(tart ip "$vm" 2>/dev/null)
+    if [[ -n "$ip" ]] && command -v sshpass >/dev/null; then
+      n=$(timeout 15 sshpass -p admin ssh -n \
+            -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
+            -o LogLevel=ERROR -o ConnectTimeout=5 \
+            -o ServerAliveInterval=5 -o ServerAliveCountMax=2 \
+            "admin@$ip" "ps axo command= | grep -c '[c]laude'" 2>/dev/null | tr -d ' \r\n')
+      if [[ "$n" =~ ^[0-9]+$ ]]; then
+        if   (( n > 5 )); then flag "$vm: $n claude processes in-guest — unstaggered fan-out, window will drain FAST"
+        elif (( n == 0 )); then ok "$vm: 0 claude processes (between phases or wrapping up)"
+        else ok "$vm: $n claude process(es) in-guest (waves-of-3 keeps this ≤5)"; fi
+      else ok "$vm: could not count in-guest processes (ssh unreachable — mid-boot?)"; fi
+    fi
   done
 fi
 
