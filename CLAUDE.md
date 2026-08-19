@@ -184,11 +184,14 @@ headroom floor and busy-pool skip. (The interim b12dcf9
 `CONT_ALLOW_DEFAULT` blacklist was removed the same day at Austin's
 direction: all 4 subs are usable; the floor is the guardrail.)
 
-**Observability gap (open).** The fan-out is invisible from the host: the
-wrangler log says only "auditor up, leaving alone", and the usage endpoint
-gives coarse window percentages. First symptom is a window at 100%. Run
-`bash scripts/fleet-health.sh` for triage; a per-VM claude-process count
-(via `cont ssh`) would make the burn visible early and is not built yet.
+**Observability — closed (804e7d1).** The fan-out used to be invisible from
+the host (wrangler log says only "auditor up, leaving alone"; the usage
+endpoint gives coarse window percentages; first symptom was a window at
+100%). `bash scripts/fleet-health.sh` now sshs into each running VM and
+counts its in-guest claude processes: a healthy staggered audit shows ~1
+orchestrator + ≤3 agents, so **>5 flags as unstaggered fan-out** — the early
+signal, before any window moves. An unreachable guest degrades to a note,
+never a flag (mid-boot VMs would cry wolf).
 
 ## Why `cont open` exists (Tahoe quirk)
 
