@@ -37,14 +37,23 @@ the artifact. Run the methodology in the named skill under `$SKILLS`.
   report from sub-agent final messages. Here **you write the artifact file
   directly** to the path given (`$AUDIT_DIR/…`). Write it yourself; do not rely
   on sub-agents' file writes.
-- **Citations must resolve.** Every `File.sol:N` you cite must point at the real
-  line in `$REPO`. Sub-agents often number chunked or flattened views — fix each
-  citation against the actual file before writing it, or drop the line number
-  and keep only the quoted snippet. A citation that lands on the wrong code
-  reads as fabrication.
+- **Citations must resolve, and must use the real filename.** Cite every
+  location as `` `<FileName>.sol:N` `` — the actual source file's name (e.g.
+  `DedicatedVaultMainV2.audit2.flat.sol:3663`), never an invented shorthand like
+  `F:N`, `L3663`, or "line 3663". The downstream citation gate resolves the
+  literal `<FileName>.sol:N` form against `$REPO`; a shorthand it can't parse
+  makes the whole report read as *uncited* even when your line numbers are
+  perfect. Every cited line must point at the real line in `$REPO` — sub-agents
+  often number chunked or flattened views, so fix each citation against the
+  actual file before writing it, or drop the line number and keep only the
+  quoted snippet. A citation that lands on the wrong code reads as fabrication.
 - **Severity discipline.** Walk every exploit path end to end before rating a
   finding High or Critical. If you cannot construct a concrete exploit, downgrade
   it and say why. Quote the relevant source lines in each finding.
+- **End with the severity-counts line.** The report's last line must be exactly
+  `**Severity counts:** Critical: N, High: N, Medium: N, Low: N, Informational: N`
+  (fill in your real tallies). The client-facing renderer reads this literal line
+  to draw the severity strip; a table alone leaves that strip blank.
 
 ## Model
 

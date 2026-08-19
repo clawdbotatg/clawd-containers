@@ -189,7 +189,7 @@ Write findings to $JOB_DIR/audit/phase2-report.md." || return 1
   ( _load_env; "$LC/log-work.sh" "$JOB_ID" "audit-pass-2-pashov" "Phase 2 depth complete" ) 2>/dev/null || true
 
   _run_audit_phase unified-report.md reconcile \
-    "You are auditing leftclaw job #$JOB_ID and nothing else. RECONCILE. Follow the reconciliation section of $SKILLS/two-phase-audit.md: merge $JOB_DIR/audit/phase1-report.md and $JOB_DIR/audit/phase2-report.md into one deduplicated, origin-tagged unified report at $JOB_DIR/audit/unified-report.md. Every finding must quote source and give a concrete exploit path; downgrade any High you cannot walk end-to-end." || return 1
+    "You are auditing leftclaw job #$JOB_ID and nothing else. RECONCILE. Follow the reconciliation section of $SKILLS/two-phase-audit.md: merge $JOB_DIR/audit/phase1-report.md and $JOB_DIR/audit/phase2-report.md into one deduplicated, origin-tagged unified report at $JOB_DIR/audit/unified-report.md. Every finding must quote source and give a concrete exploit path; downgrade any High you cannot walk end-to-end. Cite every location as the literal \`<FileName>.sol:N\` (the real source filename, never a shorthand like 'F:N' or 'line N') — the downstream gate resolves that exact form and treats anything else as uncited. End the report with exactly this line: \`**Severity counts:** Critical: N, High: N, Medium: N, Low: N, Informational: N\` (your real tallies) — the client-facing renderer reads it to draw the severity strip." || return 1
 
   state_mark_done audit
 }
@@ -243,7 +243,21 @@ PY
 )
   echo "report: citation resolution $rate (pct ok total)"
   state_set "citation_rate" "$(echo $rate | cut -d' ' -f1)"
-  local pct; pct=$(echo $rate | cut -d' ' -f1)
+  local pct total; pct=$(echo $rate | cut -d' ' -f1); total=$(echo $rate | cut -d' ' -f3)
+  # A report with real findings but ZERO parseable `File.sol:N` citations scores
+  # a vacuous 100% (0/0) — the gate verified nothing. Don't hard-fail (the report
+  # is already assembled; failing here just loops the driver), but flag it loudly
+  # so the operator/monitor catches an uncited delivery. The prompt now mandates
+  # the literal `<FileName>.sol:N` form to prevent this at the source (job 681
+  # shipped `F:N` shorthand and passed vacuously).
+  if [[ "$total" == "0" ]] && (( $(wc -c <"$final") > 4000 )); then
+    echo "report: ⚠️ VACUOUS citation gate — 0 parseable File.sol:N citations in a $(wc -c <"$final")-byte report; NOT verified (check for shorthand like 'F:N')"
+    state_set "citation_vacuous" "1"
+  fi
+  if ! grep -qiE '\*\*Severity counts\b' "$final"; then
+    echo "report: ⚠️ no '**Severity counts:**' line — the client-facing severity strip will render blank"
+    state_set "severity_counts_missing" "1"
+  fi
   if (( pct < 80 )); then echo "report: citation gate FAILED ($pct% < 80%) — fix citations before completing"; return 1; fi
   state_mark_done report
 }
