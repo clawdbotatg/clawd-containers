@@ -540,6 +540,31 @@ account_headroom_fresh() {  # account_headroom + one refresh-and-retry
   printf '%s\n' "$out"
 }
 
+# Subscription pool identity for a login dir. One email can hold seats in
+# several orgs and one org can be bound into several dirs — the ORG is the
+# usage pool, not the dir (2026-08-18: default+sub3 are one sub,
+# austinmax/ef/sub2 another; "hopping" between sibling dirs changes
+# nothing). $1 = config dir ("" = default, whose config is ~/.claude.json).
+# Prints "org_uuid<TAB>org_name"; fails if no account is bound.
+account_org() {
+  local dir="${1%/}" cfg
+  if [[ -z "$dir" ]]; then cfg="$HOME/.claude.json"; else cfg="$dir/.claude.json"; fi
+  [[ -f "$cfg" ]] || return 1
+  python3 -c '
+import json, sys
+try:
+    a = json.load(open(sys.argv[1])).get("oauthAccount") or {}
+    u, n = a.get("organizationUuid", ""), a.get("organizationName", "")
+    if not (u or n):
+        sys.exit(1)
+    print((u or n) + "\t" + (n or u))
+except SystemExit:
+    raise
+except Exception:
+    sys.exit(1)
+' "$cfg"
+}
+
 account_roster() {  # candidate config dirs, one per line ("-" = default)
   echo "-"
   local d
@@ -1005,58 +1030,80 @@ account_switch() {  # $1 = config dir ("" = default)
   echo "fleet Claude account -> $(claude_src_name)"
 }
 
-# Switch to the roster account with the most headroom. Prints the new
-# account name and exits 0 ONLY if that changed the selection to an
-# account with >= CONT_MIN_HEADROOM (default 15) headroom; exits 1
-# otherwise — so the wrangler can fall back to pausing.
+# Switch to the account whose subscription POOL has the most headroom.
+# Pool = org (see account_org): sibling dirs share one usage window, so
+# one probe prices the whole pool and hopping between siblings is never a
+# hop. Policy (2026-08-18, replaces the old default-blacklist):
+#   - every pool is fair game — the goal is a headroom FLOOR
+#     (CONT_MIN_HEADROOM, default 15%) on every pool, not a fenced-off dir;
+#   - a pool with a dir held by a RUNNING VM is skipped: stacking new work
+#     on a pool that's already burning is how a window gets pinned at 100%;
+#   - within a pool, named dirs are preferred over `default` (~/.claude) —
+#     same budget, but custody rotation on the human's interactive login
+#     is a mechanical risk worth avoiding when a sibling exists.
+# Prints the new account name and exits 0 ONLY if that changed the
+# selection to a dir whose pool has >= the floor; exits 1 otherwise — so
+# the wrangler can fall back to pausing.
 account_auto() {
   local min="${CONT_MIN_HEADROOM:-15}"
   local excl=",${CONT_EXCLUDE_ACCOUNTS:-},"
-  local cur best_dir="" best_hr="-1" def_hr="" d out hr name rc
+  local cur rows="" busy="|" done_pools="|" unknown="|" cur_org d name org rank rc out hr
   cur="$(claude_src_dir)"
   while IFS= read -r d; do
     [[ "$d" == "-" ]] && d=""
     if [[ -z "$d" ]]; then name="default"; else name="$(basename "$d")"; fi
-    # Skip logins whose credential a running VM holds (custody — probing
-    # would refresh-race the in-guest copy) and explicit exclusions
-    # (CONT_EXCLUDE_ACCOUNTS=name1,name2).
+    # Explicit exclusions (CONT_EXCLUDE_ACCOUNTS=name1,name2).
     [[ "$excl" == *",$name,"* ]] && continue
-    account_in_custody "$d" && continue
+    org="$(account_org "$d" 2>/dev/null | cut -f1)" || true
+    [[ -n "$org" ]] || org="?$name"  # no bound account: its own pool
+    # Custody (a running VM holds this credential): don't probe it (the
+    # probe's refresh races the in-guest copy) and mark the whole pool
+    # busy — its window is already being spent.
+    if account_in_custody "$d"; then busy="$busy$org|"; continue; fi
+    # rank makes named dirs sort before default within a pool
+    if [[ -z "$d" ]]; then rank="1-default"; else rank="0-$name"; fi
+    rows="$rows$org	$rank	$d
+"
+  done < <(account_roster)
+
+  local best_hr="-1" best_dir="__none__"
+  while IFS='	' read -r org rank d; do
+    [[ -n "$org" ]] || continue
+    [[ "$busy" == *"|$org|"* ]] && continue
+    [[ "$done_pools" == *"|$org|"* ]] && continue  # pool already priced
     rc=0; out="$(account_headroom_fresh "$d" 2>/dev/null)" || rc=$?
     if (( rc == 4 )); then
       # Endpoint rate-limited — the login may be perfectly healthy. On
       # 2026-08-18 a burst of probes 429'd sub5 (100% headroom), auto
-      # read it as dead, and the fallback burned the personal plan.
+      # read it as dead, and the fallback burned a healthy pool's sibling.
       sleep 20
-      out="$(account_headroom_fresh "$d" 2>/dev/null)" || continue
-    elif (( rc != 0 )); then
-      continue
+      rc=0; out="$(account_headroom_fresh "$d" 2>/dev/null)" || rc=$?
     fi
+    if (( rc == 4 )); then unknown="$unknown$org|"; continue; fi
+    (( rc != 0 )) && continue  # dead dir: try a pool sibling
+    done_pools="$done_pools$org|"
     hr="${out%% *}"
-    # `default` is the human's PERSONAL ~/.claude — last resort only. With
-    # a thin roster (2 live harness logins + 2 VMs in custody, 2026-08-07)
-    # the plain most-headroom pick landed the FLEET on it, staging the
-    # human's credential into VMs and burning their 5h window — the exact
-    # thing the accounts layer exists to prevent.
-    if [[ -z "$d" ]]; then def_hr="$hr"; continue; fi
     if awk -v a="$hr" -v b="$best_hr" 'BEGIN{exit !(a>b)}'; then
       best_hr="$hr"; best_dir="$d"
     fi
-  done < <(account_roster)
-  if ! awk -v h="$best_hr" -v m="$min" 'BEGIN{exit !(h>=m)}'; then
-    # No harness login usable. `default` is the human's PERSONAL plan and
-    # is NEVER auto-selected unless explicitly opted in — on 2026-08-18
-    # this fallback fired (every harness login dead or 429'd) and the
-    # fleet burned the personal weekly window to 98%. Pausing with jobs
-    # queued is always better than that.
-    if [[ "${CONT_ALLOW_DEFAULT:-0}" == "1" ]] && [[ -n "$def_hr" ]] \
-        && awk -v h="$def_hr" -v m="$min" 'BEGIN{exit !(h>=m)}'; then
-      best_dir=""
-      echo "account auto: no harness login has ≥${min}% headroom — CONT_ALLOW_DEFAULT=1, falling back to the PERSONAL default login" >&2
-    else
-      [[ -n "$def_hr" ]] && echo "account auto: no harness login has ≥${min}% headroom; refusing the PERSONAL default login (set CONT_ALLOW_DEFAULT=1 to allow)" >&2
-      return 1
-    fi
+  done < <(printf '%s' "$rows" | sort)
+
+  # Don't move on unknown: if the CURRENT pool's probe was rate-limited it
+  # may be perfectly healthy — hopping off it on a 429 is how this run's
+  # own verification moved the fleet from a 70% pool to a 19% one. Keep
+  # the selection; the wrangler retries auto and a later probe decides.
+  cur_org="$(account_org "$cur" 2>/dev/null | cut -f1)" || true
+  if [[ -n "$cur_org" && "$unknown" == *"|$cur_org|"* ]]; then
+    echo "account auto: current pool's usage endpoint is rate-limited — keeping the current selection, retry later" >&2
+    return 1
+  fi
+  if [[ "$best_dir" == "__none__" ]] \
+      || ! awk -v h="$best_hr" -v m="$min" 'BEGIN{exit !(h>=m)}'; then
+    echo "account auto: no subscription pool has ≥${min}% headroom (pools already burning under a running VM are skipped) — pausing beats draining a pool to zero" >&2
+    return 1
+  fi
+  if [[ -z "$best_dir" ]]; then
+    echo "account auto: selecting default (~/.claude) — last living dir of its pool; consider reviving a sibling dir" >&2
   fi
   [[ "$best_dir" == "$cur" ]] && return 1
   account_switch "$best_dir" >&2 || return 1
@@ -1076,20 +1123,22 @@ cmd_account() {
     service) claude_keychain_service ;;
     blob)    read_claude_blob_for "$(claude_src_dir)" ;;
     list)
-      local d name cur out mark rc
+      local d name cur out mark rc orgname
       cur="$(claude_src_dir)"
       while IFS= read -r d; do
         [[ "$d" == "-" ]] && d=""
         if [[ -z "$d" ]]; then name="default"; else name="$(basename "$d")"; fi
         mark=" "; [[ "$d" == "$cur" ]] && mark="*"
+        orgname="$(account_org "$d" 2>/dev/null | cut -f2)" || true
+        [[ -n "$orgname" ]] || orgname="?"
         rc=0; out="$(account_headroom_fresh "$d" 2>/dev/null)" || rc=$?
         if (( rc == 0 )); then
-          printf '%s %-10s headroom %s%%   worst window resets %s\n' \
-            "$mark" "$name" "${out%% *}" "${out#* }"
+          printf '%s %-10s pool %-32s headroom %s%%   worst window resets %s\n' \
+            "$mark" "$name" "$orgname" "${out%% *}" "${out#* }"
         elif (( rc == 4 )); then
-          printf '%s %-10s (usage endpoint rate-limited — login likely fine, retry later)\n' "$mark" "$name"
+          printf '%s %-10s pool %-32s (usage endpoint rate-limited — login likely fine, retry later)\n' "$mark" "$name" "$orgname"
         else
-          printf '%s %-10s (no usable credential)\n' "$mark" "$name"
+          printf '%s %-10s pool %-32s (no usable credential)\n' "$mark" "$name" "$orgname"
         fi
       done < <(account_roster)
       ;;

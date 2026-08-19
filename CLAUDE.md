@@ -74,14 +74,23 @@ cont reset dev                   # spec re-applied automatically
     `MAX_VMS=2` in the plist).
   - `claude-source` — config dir of the selected Claude login (empty/missing = default
     `~/.claude`); all token reads/refreshes/staging follow it. The agent-wrangler's usage
-    gate runs `cont account auto` when the current login's window exhausts, hopping the
-    fleet to the login with the most headroom instead of pausing (pause only when no
-    login has ≥15% headroom). **The personal `default` login is never auto-selected**
-    (since b12dcf9; set `CONT_ALLOW_DEFAULT=1` to opt back in) — pausing with jobs
-    queued beats burning the human's own plan. A 429 from the usage endpoint is
-    surfaced as rate-limited (exit 4, one 20s retry in auto), NOT as a dead login —
-    it 429s readily under bursts of probes, and "rate-limited" in `account list`
-    means retry later, not re-login. Never fork a credential store (copy a blob under a second
+    gate runs `cont account auto` when the current login's window exhausts.
+    **`account auto` is POOL-aware (2026-08-18):** the subscription pool is the
+    ORG a login is bound to, not the dir — one email holds seats in several orgs
+    and several dirs can hold the same org (this box: default+sub3 = one sub,
+    austinmax/ef/sub2 = one sub; ~8 dirs, 4 real subs). Grouping is by
+    `oauthAccount.organizationUuid` (`account_org`); `account list` prints each
+    dir's pool. Auto prices each pool once (named dirs preferred over `default`
+    within a pool), picks the pool with the most headroom, and pauses when no
+    pool clears the floor (`CONT_MIN_HEADROOM`, 15%) — **use every sub, drain
+    none**. A pool with a dir held by a running VM is skipped (never stack new
+    work on a pool already burning — two auditors on one pool is how a window
+    pins at 100%). A 429 from the usage endpoint is rate-limited (exit 4, one
+    20s retry), NOT a dead login — and auto **never hops off a pool whose probe
+    429'd** (it may be the healthiest pool on the box; keep, retry later).
+    The b12dcf9 `CONT_ALLOW_DEFAULT` blacklist is gone — Austin: all 4 subs are
+    the fleet's to use; the guardrail is the per-pool floor, not a fenced dir.
+    Never fork a credential store (copy a blob under a second
     keychain service and refresh both) — OAuth refresh rotates the refresh token and the
     stale copy dies. Refresh only via a real `claude -p` ping under that account's
     `CLAUDE_CONFIG_DIR` (`claude_ping_dir`), never a hand-rolled token call.
@@ -164,12 +173,16 @@ running (its skill copy is inside the VM).
 not**: when a VM boots riding the selected login, the host selection hops
 to another dir to avoid refresh contention, headroom-blind. On 08-18 that
 chain (dead selected login → dead austinmax → custody hop to `default` =
-austin.griffith@ethereum.org's PERSONAL plan) put two concurrent auditors
-on personal + EF plans while sub5 idled at 100%. **Root cause fixed in
-b12dcf9:** the hop *does* go through `cont account auto`, but a 429 from
-the usage endpoint read healthy logins as dead, and the picker's
-last-resort fallback then handed out `default`. Now 429 = retry, and
-`default` is never auto-selected without `CONT_ALLOW_DEFAULT=1`.
+austin.griffith@ethereum.org's plan) put two concurrent auditors on the
+same subs while sub5 idled at 100%. **Root cause fixed in b12dcf9 and
+finished by the pool-aware picker (2026-08-18 evening):** the hop *does*
+go through `cont account auto`, but a 429 from the usage endpoint read
+healthy logins as dead and the picker fell through. Now 429 = retry,
+auto never hops off a 429'd pool, and the picker works on the 4 real
+subscription POOLS (orgs) instead of the 8 login dirs — with a per-pool
+headroom floor and busy-pool skip. (The interim b12dcf9
+`CONT_ALLOW_DEFAULT` blacklist was removed the same day at Austin's
+direction: all 4 subs are usable; the floor is the guardrail.)
 
 **Observability gap (open).** The fan-out is invisible from the host: the
 wrangler log says only "auditor up, leaving alone", and the usage endpoint
