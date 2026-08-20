@@ -74,7 +74,7 @@ LOG="${LOG:-/tmp/agent-wrangler.log}"
 TIME_CAP_DEFAULT_SECONDS="${TIME_CAP_DEFAULT_SECONDS:-3600}"   # 1h
 TIME_CAP_BUILDER_SECONDS="${TIME_CAP_BUILDER_SECONDS:-7200}"   # 2h
 TIME_CAP_FEATURE_SECONDS="${TIME_CAP_FEATURE_SECONDS:-7200}"   # 2h
-TIME_CAP_AUDITOR_SECONDS="${TIME_CAP_AUDITOR_SECONDS:-14400}"  # 4h — 2h parked in-budget scoped jobs (508/509); VM work restarts from zero on every cap kill, so a too-tight cap loops forever
+TIME_CAP_AUDITOR_SECONDS="${TIME_CAP_AUDITOR_SECONDS:-28800}"  # 8h — phase-2 waves-of-3 (07db430) tripled depth wall-clock, and VM work restarts from zero on every cap kill, so a too-tight cap loops forever; onedollaraudit.com promises "up to 8 hours"
 
 # Stall detection. A VM holding an assigned job used to be left alone for the
 # FULL time cap — agent_alive is only consulted on the mine=0 path, so a hung
@@ -87,7 +87,13 @@ TIME_CAP_AUDITOR_SECONDS="${TIME_CAP_AUDITOR_SECONDS:-14400}"  # 4h — 2h parke
 # before the first logWork lands. Measured on job 570: first stage at 41 min.
 # FIRST_STAGE_GRACE must clear that comfortably or we recycle healthy work.
 STALL_FIRST_STAGE_SECONDS="${STALL_FIRST_STAGE_SECONDS:-5400}"  # 90 min to post ANY stage
-STALL_SECONDS="${STALL_SECONDS:-2700}"                          # 45 min between stages after that
+STALL_SECONDS="${STALL_SECONDS:-7200}"                          # 2h between stages after that.
+# Why 2h, not the old 45 min: phase 2 now runs its 12 pashov agents in waves
+# of 3 (07db430) and logs no stage note mid-phase, so a healthy depth pass is
+# quiet for 90+ min (job 693, 2026-08-19: 91 min of real work between stage
+# notes — a 45-min budget recycles that and burns the phases it re-does). If
+# depth phases outgrow 2h, teach the skill to logWork per wave rather than
+# raising this further — the budget is only as tight as the noisiest signal.
 # Bound the recycles so an un-auditable job can't loop; after this many we stop
 # intervening and let the existing time-cap / strike / park path take over.
 STALL_MAX_RECYCLES="${STALL_MAX_RECYCLES:-2}"
