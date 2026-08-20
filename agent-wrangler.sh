@@ -98,6 +98,15 @@ STALL_SECONDS="${STALL_SECONDS:-7200}"                          # 2h between sta
 # intervening and let the existing time-cap / strike / park path take over.
 STALL_MAX_RECYCLES="${STALL_MAX_RECYCLES:-2}"
 
+# When a job's on-chain notes prove the report is already built (job_report_built),
+# the audit is DONE and only delivery remains. Never recycle/cap-kill such a VM
+# inside this grace — recycling re-runs the whole audit (job 693: 7h wasted).
+# Hold the slot so the in-guest finish-line retry (upload + completeJob) can land,
+# alerting loudly. Only after the grace do we fall through to a normal recycle, so
+# a permanently-wedged delivery can't lock a VM slot forever. Measured from when
+# report-built was first observed for this VM.
+DELIVERY_GRACE_SECONDS="${DELIVERY_GRACE_SECONDS:-2700}"   # 45 min
+
 # Per-VM start-time markers. Used to compute elapsed for the cap.
 STATE_DIR="${TMPDIR:-/tmp}/agent-wrangler"
 mkdir -p "$STATE_DIR"
@@ -271,6 +280,51 @@ try:
   print("|".join(d.get("_other_strings") or []))
 except Exception:
   pass' 2>/dev/null
+}
+
+# True (exit 0) if a job's on-chain stage notes prove the audit REPORT is
+# already built — i.e. phase 2 (pashov depth) + reconciliation are complete and
+# only DELIVERY (IPFS upload + completeJob) remains. Recycling or cap-killing a
+# VM in this state throws away a finished multi-hour audit and forces a full
+# re-run from zero (job 693: report built, delivery never fired, 7h wasted).
+# Markers are the auditor's own reconciliation stage-note wording; matching is
+# whitespace/-case tolerant. Empty notes → not built (false).
+job_report_built() {
+  local jid="$1" env="$2" notes
+  notes=$(get_job_progress_sig "$jid" "$env")
+  [[ -n "$notes" ]] || return 1
+  printf '%s' "$notes" | grep -Eiq \
+    'reconciliation complete|depth agents.*blind|blind\).*reconcil|Final: *[0-9]+ *(Critical|High|Medium|Low)|Phase 2.*(complete|done)|delivery-blocked'
+}
+
+# Decide whether to HOLD a VM whose audit report is already built but not yet
+# delivered on-chain, instead of recycling/cap-killing it (which would re-run
+# the whole audit). Returns 0 = hold (caller must NOT stop the VM), 1 = proceed
+# with the normal recycle/kill. Bounded by DELIVERY_GRACE_SECONDS so a
+# permanently-wedged delivery can't lock a slot forever. Fires exactly two
+# alerts per (vm,job): one when the hold starts, one if the grace is exhausted.
+delivery_hold() {
+  local vm="$1" jid="$2" env="$3" why="${4:-}"
+  [[ -n "$jid" ]] || return 1
+  job_report_built "$jid" "$env" || return 1
+  local stampf="$STATE_DIR/$vm.delivery-since" alertf="$STATE_DIR/$vm.delivery-alerted"
+  local now first held
+  now=$(date +%s)
+  first=$(cat "$stampf" 2>/dev/null || echo "")
+  if [[ -z "$first" ]]; then printf '%s' "$now" > "$stampf"; first="$now"; fi
+  held=$(( now - first ))
+  if (( held > DELIVERY_GRACE_SECONDS )); then
+    log "  job $jid ($vm): report built but STILL undelivered after ${held}s grace — releasing to normal recycle/cap ($why)"
+    notify "⛔ job ${jid} (${vm}): audit COMPLETE but delivery kept failing for ${DELIVERY_GRACE_SECONDS}s — re-running from scratch. Check IPFS gateway / RPC / worker wallet gas."
+    rm -f "$stampf" "$alertf"
+    return 1
+  fi
+  log "  job $jid ($vm): audit report BUILT, not yet delivered (${held}s/${DELIVERY_GRACE_SECONDS}s) — HOLDING for finish-line retry, NOT recycling ($why)"
+  if [[ ! -f "$alertf" ]]; then
+    : > "$alertf"
+    notify "📦 job ${jid} (${vm}): audit DONE — delivery (IPFS upload + completeJob) pending. Holding the VM so it retries; will NOT re-run the audit. If it doesn't land in ${DELIVERY_GRACE_SECONDS}s you'll get a follow-up."
+  fi
+  return 0
 }
 
 # ── Host-side OAuth health gate ─────────────────────────────────────────
@@ -955,6 +1009,7 @@ start_vm() {
 
 stop_vm() {
   local vm="$1" reason="${2:-idle — no in-progress, no open}"
+  rm -f "$STATE_DIR/$vm.delivery-since" "$STATE_DIR/$vm.delivery-alerted" 2>/dev/null || true
   log "stopping $vm ($reason)"
   # Only notify on red for actual errors, not normal idle stops
   case "$reason" in
@@ -1178,7 +1233,9 @@ while :; do
       ./cont harvest "$vm" >>"$LOG" 2>&1 || true
       cap=$(cap_for "$vm")
       elapsed=$(elapsed_seconds "$vm")
-      if (( elapsed > cap )); then
+      if (( elapsed > cap )) && delivery_hold "$vm" "$(get_assigned_job_id "$svc" "$env")" "$env" "cap ${elapsed}s/${cap}s"; then
+        : # report built but undelivered — hold through the cap, don't wipe a finished audit
+      elif (( elapsed > cap )); then
         # Strike the assigned job (if any) before recycling. On the
         # MAX_CAP_STRIKES'th strike, try to give the job back: decline
         # works iff it was never accepted; an accepted job can't be
@@ -1246,7 +1303,9 @@ while :; do
             since=$(cat "$stampf" 2>/dev/null || echo 0)
             (( since == 0 )) && { date +%s > "$stampf"; since=$(date +%s); }
             quiet=$(( $(date +%s) - since ))
-            if (( quiet > budget )); then
+            if (( quiet > budget )) && delivery_hold "$vm" "$jid" "$env" "stalled ${quiet}s"; then
+              : # audit report built but undelivered — held, not recycled
+            elif (( quiet > budget )); then
               recycles=$(kv_get "$jid" "$STALL_RECYCLES_FILE")
               if (( recycles < STALL_MAX_RECYCLES )); then
                 kv_set "$jid" $(( recycles + 1 )) "$STALL_RECYCLES_FILE"

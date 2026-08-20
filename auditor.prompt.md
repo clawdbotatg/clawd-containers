@@ -60,19 +60,46 @@ Read the README files first so you know the available commands.
    ~/scripts/leftclaw/log-work.sh <job_id> "audit-pass-2-pashov"   "Phase 2 + reconciliation complete"
    ```
 
-6. **Publish to BGIPFS.**
+6. **Publish to BGIPFS — this is the delivery; treat it as critical, not a formality.**
    ```
    ~/scripts/bgipfs/upload.sh ~/audits/<job_id>/final-report.md
    ```
-   The script prints a `URL:` line — capture that.
+   The script prints a `URL:` line — capture that. **The report you just spent the
+   whole audit producing is worthless to the client until this URL exists and step 7
+   lands. Do not move on while either is unconfirmed.**
+   - If upload fails (non-zero exit, no `URL:` line, network/gateway error), **retry
+     up to 5 times** with a short pause between tries (a few seconds, growing). IPFS
+     gateways and RPC are flaky — most failures clear on retry.
+   - If it still fails after 5 tries, **log a visible stage note so the host can see
+     you finished the audit but couldn't deliver** (this is what turns a silent
+     finish-line death into a recoverable state):
+     ```
+     ~/scripts/leftclaw/log-work.sh <job_id> "delivery-blocked-ipfs" "Audit COMPLETE (severity counts here) — final-report.md written at ~/audits/<job_id>/final-report.md but BGIPFS upload failed N times: <error>. Needs delivery retry, NOT a re-audit."
+     ```
+     Then keep retrying on your next loop iterations — do not abandon the job or start
+     a fresh audit of the same target.
 
-7. **Complete on-chain.**
+7. **Complete on-chain — confirm it actually landed.**
    ```
    ~/scripts/leftclaw/complete.sh <job_id> "<URL from step 6>"
    ```
    Use the full `https://{CID}.ipfs.community.bgipfs.com/...` URL, not the bare CID.
+   - The script prints `status:` — treat anything other than a success (`status: 1` /
+     `0x1`) as a failure. **Retry up to 5 times** with a growing pause. A dropped tx,
+     a nonce hiccup, or a transient RPC error is normal and clears on retry.
+   - Verify by re-reading the job: `~/scripts/leftclaw/get-job.sh <job_id>` should now
+     show it is no longer status 1 (IN_PROGRESS). Only once you have confirmed this is
+     the job delivered.
+   - If `completeJob` still fails after 5 tries, log it so the host sees it:
+     ```
+     ~/scripts/leftclaw/log-work.sh <job_id> "delivery-blocked-onchain" "Report uploaded to <URL> but completeJob failed N times: <error>. Needs on-chain retry, NOT a re-audit."
+     ```
+     and keep retrying — the escrow only releases when this tx lands, and only THIS
+     worker can send it.
 
-8. Briefly summarize what you did for this job (job id, severity counts, BGIPFS URL, tx hashes) and loop back to step 1.
+8. Briefly summarize what you did for this job (job id, severity counts, BGIPFS URL,
+   tx hashes, and — critically — the confirmed final job status) and loop back to
+   step 1. **Never report a job as done until step 7 is confirmed on-chain.**
 
 ## Verification standard
 
