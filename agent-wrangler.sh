@@ -620,10 +620,17 @@ except: print("")' 2>/dev/null)
     log "  job $jid: sanitize still pending — deferring 5min (no boot)"
     defer_job "$jid" 300
     return 1
-  else
+  elif [[ "$safe" == "False" ]]; then
+    # Only an explicit safe:false from valid JSON is a verdict. An empty or
+    # garbled resp (curl failure, 500, KV outage) used to fall in here and
+    # irreversibly declined a paying job — job 730, 2026-08-25.
     if host_decline "$jid" "$env" "sanitize refused"; then
       defer_job "$jid" 86400
     fi
+    return 1
+  else
+    log "  job $jid: sanitize check errored (empty/invalid response) — deferring 5min, NOT declining"
+    defer_job "$jid" 300
     return 1
   fi
 

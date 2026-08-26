@@ -103,7 +103,11 @@ try:print(json.load(sys.stdin).get("pending"))
 except:print("")' 2>/dev/null)
   if [[ "$safe" == "True" ]]; then echo "sanitize: safe"; state_mark_done sanitize; return 0
   elif [[ "$pending" == "True" ]]; then echo "sanitize: still PENDING server-side — park & retry later"; return 3
-  else echo "sanitize: NOT safe — declining"; ( _load_env; "$LC/decline.sh" "$JOB_ID" ) 2>/dev/null; return 1; fi
+  elif [[ "$safe" == "False" ]]; then
+    # Explicit unsafe verdict only. An empty/errored resp must never land
+    # here — it declined benign job 730 (2026-08-25).
+    echo "sanitize: NOT safe — declining"; ( _load_env; "$LC/decline.sh" "$JOB_ID" ) 2>/dev/null; return 1
+  else echo "sanitize: check errored (empty/invalid response) — park & retry later"; return 3; fi
 }
 
 # ── phase 2: safety (OUR deep nefariousness pre-flight) ────────────────────
