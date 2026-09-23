@@ -181,7 +181,25 @@ restated here against V4's turn names rather than applied verbatim:
 - **Inject the map, NOT the findings:** the 12 attack agents receive `{map_body}` as
   structural context (same framing as Turn 1) in addition to their bundle. Do NOT
   pass `phase1-report.md`.
+- **Every V4 shell snippet runs under bash.** The Bash tool's default shell in the
+  auditor VM is zsh; V4's bundle-build and awk snippets use bash arrays and bash
+  word-splitting, and under zsh they either die (`bad substitution`) or silently
+  build ONE bundle from a garbage filename. Wrap each snippet: `bash <<'EOF' … EOF`.
+  Then check: exactly 12 `agent-N-bundle.md` files, each = source.md lines + a few
+  hundred (rehearsal 954, 2026-09-23).
 - **Turn 3b:** read `{resolved_path}/dedup-and-assembly.md` while waiting, as V4 says.
+- **Turn 4 lead promotion — gate first.** V4's rule "LEAD → FINDING (conf 75) if
+  `[agents: 2+]` demoted (not rejected) same issue" is about a FINDING the gate
+  itself demoted. A LEAD the agents submitted AS a lead has not been gated: run it
+  through gates 1–4 first, and promote on convergence only if it would have cleared.
+  Convergence alone never promotes — on rehearsal 954, 7 of 12 agents converged on
+  a premise the target's own interface contradicted; the literal reading would have
+  printed a Fix-blocked finding for it.
+- **Turn 4 run file — two shapes.** A FINDING block and a LEAD block are different
+  on disk (`report-formatting.md` shows the finding block at length, the lead
+  one-liner briefly). A lead written in the finding shape breaks `assemble.sh`'s
+  geometry silently. Check `run-1.md` before Turn 5: every block under `## Leads`
+  is one `- **Title** — \`loc\` — smells — text` line between its markers.
 - **Turn 4:** run V4's dedup + gate as-is (intra-phase; cross-phase dedup is Turn 3
   below). It writes `run-1.md` and prints no report — that is correct, do not print
   one yourself.
