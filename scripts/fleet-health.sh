@@ -65,6 +65,26 @@ if [[ -s "$STATE/cap_strikes.txt" ]]; then
   done < "$STATE/cap_strikes.txt"
 else ok "no cap strikes"; fi
 
+hdr "worker wallet gas (Base ETH — no gas = audits that can't be delivered)"
+# Job 860 (09-2026) was fully audited at least twice on a wallet holding
+# ~1e12 wei; completeJob needed ~1.5e12. The wrangler now refuses to boot
+# below MIN_GAS_WEI (same default as agent-wrangler.sh); this is the glance.
+MIN_GAS_WEI="${MIN_GAS_WEI:-20000000000000}"
+for env in "$HERE"/.env.auditor "$HERE"/.env.auditor2 "$HERE"/.env.frontend-qa "$HERE"/.env.builder "$HERE"/.env.research "$HERE"/.env.feature; do
+  [[ -r "$env" ]] || continue
+  tag=$(basename "$env")
+  read -r addr bal < <( ( set -a; source "$env" 2>/dev/null; set +a
+      [[ -n "${PRIVATE_KEY:-}" && -n "${ALCHEMY_API_KEY:-}" ]] || exit 0
+      a=$(cast wallet address --private-key "$PRIVATE_KEY" 2>/dev/null) || exit 0
+      b=$(cast balance "$a" --rpc-url "https://base-mainnet.g.alchemy.com/v2/$ALCHEMY_API_KEY" 2>/dev/null) || exit 0
+      echo "$a $b" ) )
+  if [[ -z "${bal:-}" || ! "$bal" =~ ^[0-9]+$ ]]; then ok "$tag — could not read balance (no key/RPC)"; continue; fi
+  eth=$(python3 -c "print('%.6f' % (int('$bal')/1e18))")
+  if (( ${#bal} <= 18 && bal < MIN_GAS_WEI )); then flag "$tag $addr — ${eth} ETH, BELOW gas floor; wrangler won't boot it"
+  elif (( ${#bal} <= 18 && bal < MIN_GAS_WEI * 5 )); then flag "$tag $addr — ${eth} ETH, low (≈ a few dozen txs left)"
+  else ok "$tag $addr — ${eth} ETH"; fi
+done
+
 hdr "account usage (grouped by SUBSCRIPTION, not by directory)"
 # A config dir is not a subscription. One login can hold seats in several
 # orgs, and the same org can be signed in under several dirs -- and the ORG
@@ -131,8 +151,9 @@ n=$(ps aux | awk '$3>90 && /[r]g |[f]ind |[c]laude/ {print}' | wc -l | tr -d ' '
 
 hdr "code freshness"
 cd "$HERE" || exit 1
-[[ -z "$(git status --porcelain)" ]] && ok "worktree clean (self-update can run)" \
-                                     || flag "worktree DIRTY — this box will stop pulling updates"
+# Tracked changes only — matches self_update, which ignores untracked debris.
+[[ -z "$(git status --porcelain --untracked-files=no)" ]] && ok "worktree clean (self-update can run)" \
+                                     || flag "worktree DIRTY (tracked edits) — this box will stop pulling updates"
 git fetch -q origin main 2>/dev/null
 behind=$(git rev-list --count HEAD..origin/main 2>/dev/null || echo 0)
 (( behind > 0 )) && flag "behind origin/main by $behind commit(s)" || ok "up to date with origin/main"

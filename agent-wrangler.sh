@@ -574,6 +574,43 @@ host_post_message() {
     ./scripts/leftclaw/post-message.sh "$jid" "$msg" >>"$LOG" 2>&1 )
 }
 
+# ── Gas gate ─────────────────────────────────────────────────────────────
+# Every on-chain step the guest takes (accept, logWork, complete) is paid
+# in Base ETH from the worker wallet. With none, the agent audits the job
+# to completion and then can't deliver it: job 860 was fully audited at
+# least twice (2026-09-07 → 09-23) while auditor2's wallet held ~1e12 wei
+# and completeJob needed ~1.5e12. Every logWork failed too, so from the
+# host it read as a stall; each recycle burned another 8h of subscription
+# re-auditing a finished job. Check the wallet BEFORE booting: below the
+# floor, tell Telegram once and skip the boot until someone refuels.
+# Fail OPEN on an RPC/tooling error — a gas probe must never park the fleet.
+MIN_GAS_WEI="${MIN_GAS_WEI:-20000000000000}"   # 0.00002 ETH ≈ 10 txs at Base fees of 09-2026
+GAS_CHECK_EVERY="${GAS_CHECK_EVERY:-300}"
+wallet_gas_ok() {
+  local env="$1" tag; tag=$(basename "$env")
+  local stamp="$STATE_DIR/gas.$tag.checked-at" state="$STATE_DIR/gas.$tag.state"
+  local now last; now=$(date +%s); last=$(cat "$stamp" 2>/dev/null || echo 0)
+  if (( now - last < GAS_CHECK_EVERY )) && [[ -f "$state" ]]; then
+    [[ "$(cat "$state")" == "ok" ]]; return
+  fi
+  local addr bal
+  addr=$( ( set -a; source "$env" 2>/dev/null; set +a
+            [[ -n "${PRIVATE_KEY:-}" ]] && cast wallet address --private-key "$PRIVATE_KEY" 2>/dev/null ) )
+  bal=$( ( set -a; source "$env" 2>/dev/null; set +a
+           [[ -n "$addr" && -n "${ALCHEMY_API_KEY:-}" ]] && \
+             cast balance "$addr" --rpc-url "https://base-mainnet.g.alchemy.com/v2/$ALCHEMY_API_KEY" 2>/dev/null ) )
+  echo "$now" > "$stamp"
+  # Not a number (RPC down, no key, no cast) or too big for bash math (>9 ETH): treat as ok.
+  if [[ ! "$bal" =~ ^[0-9]{1,18}$ ]]; then echo ok > "$state"; return 0; fi
+  local prev; prev=$(cat "$state" 2>/dev/null || echo "")
+  if (( bal >= MIN_GAS_WEI )); then
+    [[ "$prev" == "low" ]] && notify "⛽ worker wallet $addr ($tag) refueled — ${bal} wei on Base; booting again"
+    echo ok > "$state"; return 0
+  fi
+  [[ "$prev" != "low" ]] && notify "⛽ worker wallet $addr ($tag) has only ${bal} wei on Base (floor ${MIN_GAS_WEI}). NOT booting — the agent can't accept, logWork or complete without gas. Send a little Base ETH to $addr."
+  echo low > "$state"; return 1
+}
+
 # ── Problem-job strikes ─────────────────────────────────────────────────
 # "If a job causes problems, decline it and move on." A job that keeps
 # burning boot cycles (VM boots, agent never accepts) accumulates
@@ -1359,6 +1396,12 @@ while :; do
             log "$vm: assigned job $jid is PARKED (${MAX_CAP_STRIKES} time-cap strikes) — not booting; client cancel or clear it from $CAP_STRIKES_FILE"
             continue
           fi
+        fi
+        # Gas gate: no Base ETH in the worker wallet = a VM that audits and
+        # can't deliver (job 860). Notifies once; re-probes every 5 min.
+        if ! wallet_gas_ok "$env"; then
+          log "$vm: worker wallet below gas floor (${MIN_GAS_WEI} wei) — not booting until refueled"
+          continue
         fi
         fails=$(kv_get "$vm" "$FAILURES_FILE")
         if (( fails >= MAX_START_RETRIES )); then

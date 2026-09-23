@@ -14,7 +14,7 @@ internally so the agent never sees `PRIVATE_KEY` or your auth signature.
 | `get-job.sh` | `<job_id>` | none | Read full Job from contract. Returns `{id, client, worker, serviceTypeId, status, description}` (description is the audit target) |
 | `sanitize-check.sh` | `<job_id>` | none | GET `/api/job/sanitize?jobId={id}`; on `pending` it POSTs `{jobId}` to trigger the server-side check (jobs posted straight to the contract are never checked otherwise) and uses that verdict. Exit 0 iff `safe=true` |
 | `messages.sh` | `<job_id>` | signed | GET messages for a job (signature auth) |
-| `post-message.sh` | `<job_id> <text...>` | signed | POST a message visible to the client |
+| `post-message.sh` | `<job_id> <text...>` | signed | POST a message visible to the client. Sent as the server's only accepted worker shape (`escalation` from `bot`): first line = headline, whole text = body, `POST_STAGE` env = stage label (default `update`) |
 | `accept.sh` | `<job_id>` | `PRIVATE_KEY` | `acceptJob(uint256)` |
 | `decline.sh` | `<job_id>` | `PRIVATE_KEY` | `declineJob(uint256)` |
 | `log-work.sh` | `<job_id> <stage> <note>` | `PRIVATE_KEY` | `logWork(uint256,string,string)` (note, stage swapped on the wire to match contract sig) |
