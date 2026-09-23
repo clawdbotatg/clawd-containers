@@ -95,6 +95,11 @@ Execute `skills/pashov-skills/x-ray/SKILL.md` end to end against the target root
   target executes the target's own code (ffi, build scripts, test hooks) inside an
   environment that may hold job credentials. Test *existence* already comes from
   `enumerate.sh` file counts. In the report, state:
+  **BSD grep trap (rehearsals 952/954):** `enumerate.sh` measures with `grep -P`, which
+  macOS grep lacks, so every nSLOC / test count prints `0` with rc=0 (upstream
+  pashov/skills PR #47 fixes it, unmerged as of 2026-09-23). Never copy a `0` from it
+  into `x-ray.md`; recompute nSLOC per file with
+  `grep -cE '[^[:space:]]' f` minus `grep -cE '^[[:space:]]*(//|/\*|\*|\*/)' f`.
   `coverage metrics unavailable — target-code execution disabled by audit policy`.
   x-ray's own rules (its "Test existence vs. coverage execution" section) handle
   this cleanly; never let the absence of coverage metrics cascade into "no tests".
