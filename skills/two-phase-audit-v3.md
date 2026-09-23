@@ -192,6 +192,18 @@ restated here against V4's turn names rather than applied verbatim:
   build ONE bundle from a garbage filename. Wrap each snippet: `bash <<'EOF' … EOF`.
   Then check: exactly 12 `agent-N-bundle.md` files, each = source.md lines + a few
   hundred (rehearsal 954, 2026-09-23).
+- **Turn 3a — line numbers come from the real file, never the bundle.** Append to
+  every agent prompt: *"Line numbers in your bundle are bundle lines, not source
+  lines. Before you cite `File.sol:N`, Read that file and take N from it, or cite
+  the function name and quoted code with no line number. A bundle line number in
+  a citation is a wrong citation."* Rehearsal 934: 6 of 12 agents cited
+  `Probate.sol:2298` for code at line 228 (the bundle offset). V3 bundles the same
+  way, so this was always true; our reconcile step re-derives every citation, but
+  the agents should not hand it wrong numbers to start with.
+- **Scope override for first-party interfaces.** V4's default `find` excludes
+  `interfaces/`. When the client's scope names interface files (a manifest, a file
+  list, "N first-party .sol" that only adds up with them), put them in `source.md`
+  — build the file list from the client scope, not from V4's default find.
 - **Turn 3b:** read `{resolved_path}/dedup-and-assembly.md` while waiting, as V4 says.
 - **Turn 4 lead promotion — gate first.** V4's rule "LEAD → FINDING (conf 75) if
   `[agents: 2+]` demoted (not rejected) same issue" is about a FINDING the gate
