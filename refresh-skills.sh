@@ -40,7 +40,7 @@ git -C pashov-skills fetch --depth=1 origin "$PASHOV_SHA"
 git -C pashov-skills reset --hard "$PASHOV_SHA"
 git -C pashov-skills sparse-checkout set "${PASHOV_SKILLS[@]}"
 
-# --- pashov solidity-auditor V4 (STAGED — a second tree, pinned separately)
+# --- pashov solidity-auditor V4 (LIVE phase 2 since 2026-09-23 — a second tree, pinned separately)
 # f6c7f0d (2026-09-23, "v4 — loop mode, scan memory, shell-assembled report")
 # reviewed 2026-09-23: one new executable, references/assemble.sh — pure
 # awk/sed/grep over the run directory it is given, writes only
@@ -49,10 +49,10 @@ git -C pashov-skills sparse-checkout set "${PASHOV_SKILLS[@]}"
 # explicit READ-ONLY rule for the audited repo. NOT drop-in for our pipeline:
 # Turn 1b now asks a pass-count question that refuses to be skipped and waits
 # for a human (a headless run hangs), Turn 4 no longer prints a report, and a
-# new Turn 5 runs assemble.sh. two-phase-audit-v3.md (STAGED) carries the
-# overrides; two-phase-audit-v2.md (LIVE) stays on the V3 tree above until a
-# rehearsal passes. Promote by moving PASHOV_SHA to this SHA, porting the v3
-# Turn 2 overrides into v2, and deleting this block + the -v4 copies.
+# new Turn 5 runs assemble.sh. two-phase-audit-v3.md (LIVE) carries the
+# overrides. The V3 tree above stays: x-ray, fizz, the v2 fallback and the
+# host-auditor read it. Rehearsed 2026-09-23 on jobs 954/952/934 in this exact
+# two-tree layout — don't merge the trees without another rehearsal.
 PASHOV_V4_SHA=f6c7f0de9cce16f6aa9c57aaac104f0dee90582e
 PASHOV_V4_SKILLS=(solidity-auditor)
 if [[ ! -d pashov-skills-v4/.git ]]; then

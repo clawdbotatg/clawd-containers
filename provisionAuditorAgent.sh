@@ -84,14 +84,14 @@ for d in evm-audit-skills pashov-skills tob-audit-context; do
     exit 1
   fi
 done
-# STAGED pashov solidity-auditor V4 tree (two-phase-audit-v3.md only). Optional:
-# it appears on a box at its next 24h skills refresh, and the LIVE v2 path
-# never reads it, so a missing copy must not fail the boot.
+# pashov solidity-auditor V4 tree — LIVE phase 2 since 2026-09-23. Required:
+# the wrangler's needs_skills_refresh pulls it the moment a box lacks it.
 if [[ -d /tmp/skills/pashov-skills-v4 ]]; then
   rm -rf "$HOME/skills/pashov-skills-v4"
   cp -R /tmp/skills/pashov-skills-v4 "$HOME/skills/pashov-skills-v4"
 else
-  echo "note: skills/pashov-skills-v4 not staged on host yet (v3 rehearsal needs it; run ./refresh-skills.sh)"
+  echo "ERROR: /tmp/skills/pashov-skills-v4 missing — host-side skills/pashov-skills-v4/ must exist (run ./refresh-skills.sh)" >&2
+  exit 1
 fi
 
 # --- .env.auditor and prompt file --------------------------------------

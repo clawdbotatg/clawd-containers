@@ -1,6 +1,6 @@
 ---
 name: deep-audit-v2
-description: LIVE production audit orchestrator. Three-phase audit — context-building (phase 0) → ethskills breadth (phase 1) → pashov depth (phase 2, blind) → reconcile + coverage gate. Adds a protocol map, access-control inventory, and threat catalog before hunting. The leftclaw auditor (auditor.prompt.md) runs this. `two-phase-audit.md` (v1, no context phase) is the fallback.
+description: FALLBACK (was LIVE until 2026-09-23; `two-phase-audit-v3.md` is live now). Three-phase audit — context-building (phase 0) → ethskills breadth (phase 1) → pashov depth (phase 2, blind) → reconcile + coverage gate. Adds a protocol map, access-control inventory, and threat catalog before hunting. Runs pashov solidity-auditor V3 from the pinned `pashov-skills/` tree. `two-phase-audit.md` (v1, no context phase) is the fallback.
 ---
 
 # Two-Phase Audit v2 — with Context-Building Phase 0

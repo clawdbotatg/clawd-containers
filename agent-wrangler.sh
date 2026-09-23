@@ -1051,6 +1051,9 @@ needs_skills_refresh() {
   # Core skill tree that several agents depend on
   local marker="skills/evm-audit-skills/.git"
   [[ -e "$marker" ]] || return 0
+  # pashov V4 tree (live phase 2 since 2026-09-23): a box that predates it
+  # refreshes now, not at the 24h mark — provisioning hard-fails without it.
+  [[ -e "skills/pashov-skills-v4/.git" ]] || return 0
   local age_hours
   age_hours=$(( ($(date +%s) - $(stat -f %m "$marker" 2>/dev/null || echo 0)) / 3600 ))
   (( age_hours >= SKILLS_MAX_AGE_HOURS )) && return 0

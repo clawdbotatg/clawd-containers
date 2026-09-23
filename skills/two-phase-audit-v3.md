@@ -1,15 +1,16 @@
 ---
 name: deep-audit-v3
-description: STAGED audit orchestrator (v2 + pashov x-ray as Phase 0a). Four-stage audit — x-ray pre-scan (phase 0a) → context-building (phase 0) → ethskills breadth (phase 1) → pashov depth (phase 2, blind) → reconcile + coverage gate (now with an invariant-verification axis). Promote to LIVE (point auditor.prompt.md here) only after a rehearsal job validates it end-to-end. `two-phase-audit-v2.md` is the current LIVE orchestrator.
+description: LIVE production audit orchestrator (promoted 2026-09-23 after rehearsals 954/952/934). Four-stage audit — x-ray pre-scan (phase 0a) → context-building (phase 0) → ethskills breadth (phase 1) → pashov solidity-auditor V4 depth (phase 2, blind, one pass, memory off) → reconcile + coverage gate with an invariant-verification axis. The leftclaw auditor (auditor.prompt.md) runs this. `two-phase-audit-v2.md` is the previous orchestrator, kept as a fallback.
 ---
 
 # Two-Phase Audit v3 — v2 + X-Ray Pre-Scan (Phase 0a)
 
-> **STAGED — not yet the production default.** `auditor.prompt.md` still points at
-> `two-phase-audit-v2.md`. This version adds pashov's **x-ray** skill as a Phase 0a
-> pre-scan whose grep-verified entry-point classification and synthesized invariant
-> catalog sharpen everything downstream. Promote only after a rehearsal job runs
-> clean end to end.
+> **LIVE since 2026-09-23.** `auditor.prompt.md` points here. Promoted after three
+> offline rehearsals replaying marketplace jobs 954, 952 and 934 (notes in the
+> fleet memory). Adds pashov's **x-ray** skill as a Phase 0a pre-scan and runs
+> pashov solidity-auditor **V4** in Phase 2 (`pashov-auditor-v4.md`,
+> `pashov-skills-v4/`, a second SHA-pinned tree — the V3 tree under
+> `pashov-skills/` still serves x-ray and the v2 fallback).
 
 You are the orchestrator of a **four-stage** audit:
 
