@@ -8,7 +8,7 @@
 # hypervisor process and every later boot stacked a second one).
 set -euo pipefail
 
-STATE_DIR="$(getconf DARWIN_USER_TEMP_DIR)agent-wrangler"
+STATE_DIR="${WRANGLER_STATE_DIR:-$HOME/.config/cont/wrangler-state}"   # same as agent-wrangler.sh
 HERE="$(cd "$(dirname "$0")" && pwd)"
 
 echo "==> stopping auditor VM gracefully (avoids orphaned tart on restart)"

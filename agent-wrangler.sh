@@ -107,9 +107,22 @@ STALL_MAX_RECYCLES="${STALL_MAX_RECYCLES:-2}"
 # report-built was first observed for this VM.
 DELIVERY_GRACE_SECONDS="${DELIVERY_GRACE_SECONDS:-2700}"   # 45 min
 
-# Per-VM start-time markers. Used to compute elapsed for the cap.
-STATE_DIR="${TMPDIR:-/tmp}/agent-wrangler"
+# Per-VM start-time markers, defer timers, strike counters. Used to compute
+# elapsed for the cap and to remember which jobs are parked.
+#
+# NOT under $TMPDIR: macOS purges the per-user temp dir on reboot and after
+# ~3 idle days. On 2026-09-23 that wiped cap_strikes.txt twice in one
+# morning (3-day purge at ~06:59, reboot at 07:59) and un-parked job 860,
+# which had already burned three 8h caps — every wipe cost another cap.
+STATE_DIR="${WRANGLER_STATE_DIR:-$HOME/.config/cont/wrangler-state}"
 mkdir -p "$STATE_DIR"
+# One-time carry-over from the old temp location so a live wrangler keeps
+# its start markers and strikes across the move. cp -n: never clobber.
+OLD_STATE_DIR="${TMPDIR:-/tmp}/agent-wrangler"
+if [[ -d "$OLD_STATE_DIR" && ! -f "$STATE_DIR/.migrated" ]]; then
+  cp -n "$OLD_STATE_DIR"/* "$STATE_DIR"/ 2>/dev/null || true
+  touch "$STATE_DIR/.migrated"
+fi
 
 # Max consecutive start_vm() failures before we back off and stop retrying
 # until the VM's queue empties (or it eventually starts).

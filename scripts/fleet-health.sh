@@ -11,7 +11,7 @@
 set -uo pipefail
 HERE="$(cd "$(dirname "$0")/.." && pwd)"
 HARNESS="${HARNESS:-$HOME/clawd/clawd-harness}"
-STATE="${TMPDIR:-/tmp}/agent-wrangler"
+STATE="${WRANGLER_STATE_DIR:-$HOME/.config/cont/wrangler-state}"   # same as agent-wrangler.sh
 FLAGS=0
 ok()   { printf "  \033[32mOK\033[0m   %s\n" "$*"; }
 flag() { printf "  \033[31mFLAG\033[0m %s\n" "$*"; FLAGS=$((FLAGS+1)); }
