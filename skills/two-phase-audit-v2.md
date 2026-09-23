@@ -137,6 +137,9 @@ Do not start Turn 2 until `phase1-report.md` exists.
 Execute `skills/pashov-auditor.md` Turns 1–4 **with these overrides**:
 
 - **Skip its Turn 1b** (model question) — `{agent_model}` already chosen.
+- **`{resolved_path}` is `skills/pashov-skills/solidity-auditor/references` — set it,
+  do not Glob for it.** A second, staged copy of the skill (`pashov-skills-v4/`) may
+  sit beside it and matches the same glob; this orchestrator runs the pinned V3 tree.
 - **Staggered spawn (2026-08-18) — overrides pashov Turn 3a's "spawn all 12 at
   once".** Build all 12 bundles and run all 12 agents exactly as the skill
   specifies — full coverage, nothing cut — but spawn them in **waves of 3**

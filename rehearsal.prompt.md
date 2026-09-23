@@ -21,6 +21,7 @@ When the audit is complete, write `~/audits/rehearsal/rehearsal-notes.md` coveri
 - Did **Phase 0a (x-ray)** run end to end? Which of its scripts executed cleanly vs failed (and the fallback taken)? Was `python3` available in this VM? Confirm the no-network and no-target-code-execution overrides were honored (you never ran `forge build`/`forge coverage`/tests on the target).
 - Did the x-ray entry-point list and the Phase 0 access-control inventory reconcile cleanly, or were there mismatches (list them)?
 - The final coverage-gate line (entrypoints / threat rows / invariants answered) and the invariant verdict counts (hold / violated / unverified).
+- Did **Phase 2 (pashov solidity-auditor V4)** run as ONE pass with memory off and no question asked or printed? Did `assemble.sh` exit 0, and did `phase2-report.md` end up as the full `full-report.md` (every finding, not a 3-row slice)? Were the 12 agents spawned in waves of 3? Did any agent write into the target clone (it must not)? Quote V4's `Scope` table rows.
 - Anything in `two-phase-audit-v3.md` that was ambiguous, contradictory, or broken while you followed it — quote the offending instruction. This feedback gates promotion, so be blunt.
 
 End your run by printing a one-paragraph summary: finding counts by severity, whether Phase 0a added value over what Phase 0 alone would have produced, and PASS/FAIL: would you promote v3 based on this run?

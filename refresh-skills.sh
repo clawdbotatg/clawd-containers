@@ -40,12 +40,38 @@ git -C pashov-skills fetch --depth=1 origin "$PASHOV_SHA"
 git -C pashov-skills reset --hard "$PASHOV_SHA"
 git -C pashov-skills sparse-checkout set "${PASHOV_SKILLS[@]}"
 
+# --- pashov solidity-auditor V4 (STAGED — a second tree, pinned separately)
+# f6c7f0d (2026-09-23, "v4 — loop mode, scan memory, shell-assembled report")
+# reviewed 2026-09-23: one new executable, references/assemble.sh — pure
+# awk/sed/grep over the run directory it is given, writes only
+# {dir}/full-report.md, no network, no eval, no command built from file
+# contents. The only curl is the pre-existing VERSION check. Agents gain an
+# explicit READ-ONLY rule for the audited repo. NOT drop-in for our pipeline:
+# Turn 1b now asks a pass-count question that refuses to be skipped and waits
+# for a human (a headless run hangs), Turn 4 no longer prints a report, and a
+# new Turn 5 runs assemble.sh. two-phase-audit-v3.md (STAGED) carries the
+# overrides; two-phase-audit-v2.md (LIVE) stays on the V3 tree above until a
+# rehearsal passes. Promote by moving PASHOV_SHA to this SHA, porting the v3
+# Turn 2 overrides into v2, and deleting this block + the -v4 copies.
+PASHOV_V4_SHA=f6c7f0de9cce16f6aa9c57aaac104f0dee90582e
+PASHOV_V4_SKILLS=(solidity-auditor)
+if [[ ! -d pashov-skills-v4/.git ]]; then
+  echo "==> cloning skills/pashov-skills-v4 (sparse: ${PASHOV_V4_SKILLS[*]})"
+  rm -rf pashov-skills-v4
+  git clone --filter=blob:none --sparse https://github.com/pashov/skills.git pashov-skills-v4
+fi
+echo "==> pinning skills/pashov-skills-v4 to reviewed SHA ${PASHOV_V4_SHA:0:7} (sparse: ${PASHOV_V4_SKILLS[*]})"
+git -C pashov-skills-v4 fetch --depth=1 origin "$PASHOV_V4_SHA"
+git -C pashov-skills-v4 reset --hard "$PASHOV_V4_SHA"
+git -C pashov-skills-v4 sparse-checkout set "${PASHOV_V4_SKILLS[@]}"
+
 # --- top-level pointers (the original SKILL.md files we keep for context)
 # ethskills.com is our own content (austintgriffith/evm-audit-skills) — kept
 # live; the pashov pointer is pinned to the same reviewed SHA as the clone.
 echo "==> refreshing top-level SKILL.md pointers"
 curl -fsSL https://ethskills.com/audit/SKILL.md -o ethskills-audit.md
 curl -fsSL "https://raw.githubusercontent.com/pashov/skills/$PASHOV_SHA/solidity-auditor/SKILL.md" -o pashov-auditor.md
+curl -fsSL "https://raw.githubusercontent.com/pashov/skills/$PASHOV_V4_SHA/solidity-auditor/SKILL.md" -o pashov-auditor-v4.md
 
 echo
 echo "==> done. Tree:"

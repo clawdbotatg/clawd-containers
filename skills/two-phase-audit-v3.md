@@ -21,8 +21,10 @@ You are the orchestrator of a **four-stage** audit:
   inventory, threat catalog. **No findings.** Cross-checked against Phase 0a.
 - **Phase 1 — breadth** (`skills/ethskills-audit.md`): checklist coverage of known
   vuln patterns.
-- **Phase 2 — depth** (`skills/pashov-auditor.md`): attacker-mindset hunting, run
-  **blind to phase-1 findings**, armed with the x-ray invariant catalog.
+- **Phase 2 — depth** (`skills/pashov-auditor-v4.md`, **pashov solidity-auditor V4 —
+  NEW in v3**): attacker-mindset hunting, run **blind to phase-1 findings**, armed
+  with the x-ray invariant catalog. One pass, memory off, report assembled by
+  V4's `assemble.sh`.
 - **Phase 3 — reconcile**: merge, cross-check, coverage gate (now three axes:
   entrypoints, threat rows, **invariants**), file once.
 
@@ -30,7 +32,7 @@ Phase 0a and the invariant axis are the only structural changes from v2. Everyth
 below not marked **NEW in v3** is identical to `two-phase-audit-v2.md`.
 
 **Read all four skill files at Turn 0** (`pashov-skills/x-ray/SKILL.md`,
-`audit-context.md`, `ethskills-audit.md`, `pashov-auditor.md`). The overrides below
+`audit-context.md`, `ethskills-audit.md`, `pashov-auditor-v4.md`). The overrides below
 modify their steps, they do not replace them.
 
 **Report assembly — robust across runtimes.** Instruct every agent in every phase to
@@ -66,7 +68,7 @@ its cost is noise next to the 12-agent depth phase.
 In one message:
 
 1. **Read** `skills/pashov-skills/x-ray/SKILL.md`, `skills/audit-context.md`,
-   `skills/ethskills-audit.md`, and `skills/pashov-auditor.md`.
+   `skills/ethskills-audit.md`, and `skills/pashov-auditor-v4.md`.
 2. Resolve scope per Mode Selection (Bash `find` for default mode).
 3. Create one shared audit dir: Bash `mktemp -d ./.audit-3phase-XXXXXX` → `{audit_dir}`.
    Holds `protocol-map.md`, `phase1-report.md`, `phase2-report.md`, `unified-report.md`.
@@ -153,9 +155,49 @@ Do not start Turn 2 until `phase1-report.md` exists.
 
 ### Turn 2 — Phase 2: depth (pashov), blind
 
-**v2's overrides apply verbatim** (skip its Turn 1b; staggered spawn in waves of 3
-— all 12 agents, never all at once; blind to phase-1 findings;
-inject `{map_body}`; output → `{audit_dir}/phase2-report.md`), plus:
+Execute `skills/pashov-auditor-v4.md` (**pashov solidity-auditor V4 — NEW in v3**)
+Turns 1–5 with these overrides. V4 renumbered the skill, so v2's overrides are
+restated here against V4's turn names rather than applied verbatim:
+
+- **`{resolved_path}` is `skills/pashov-skills-v4/solidity-auditor/references` — set
+  it, do not Glob for it.** The pinned V3 tree (`pashov-skills/`) sits beside it and
+  matches the same glob; V4's Turn 2 reads `agent-prompts.md`, `report-language.md`
+  and `dedup-and-assembly.md`, which only the V4 tree has.
+- **Turn 1b — one pass, memory off, no question.** Behave exactly as if `--loop 1`
+  had been passed: `{passes}` = 1, skip the pass question silently (V4's own
+  Turn 1b-iii rule for a flag), never print the Turn 1b-ii fallback block, and never
+  stop to wait. `{agent_model}` was chosen at Turn 0 — skip the model question too.
+  Memory stays off: no `--memory`, so Turn 1c, Turn 2 step 2 and Turn 4 steps 4 and 6
+  are all skipped, and nothing is written to `.solidity-auditor/memory.tsv`. Each
+  extra pass is another full 12-agent fan-out; the pipeline's burn budget is one.
+- **Turn 1e (remote VERSION curl) — skip it.** This tree is pinned on purpose; the
+  "not using the latest version" warning is noise here.
+- **Turn 3a — staggered spawn (v2's 2026-08-18 rule).** Build all 12 bundles and run
+  all 12 agents exactly as V4 specifies — full coverage, nothing cut — but spawn them
+  in **waves of 3** (agents 1–3, then 4–6, 7–9, 10–12), waiting for every agent in a
+  wave to notify completion before spawning the next. 12 concurrent contexts drain a
+  subscription's 5h window in minutes. Keep V4's READ-ONLY paragraph in every prompt.
+- **Blind to phase-1 FINDINGS:** pass **no phase-1 output** into the 12 agents.
+- **Inject the map, NOT the findings:** the 12 attack agents receive `{map_body}` as
+  structural context (same framing as Turn 1) in addition to their bundle. Do NOT
+  pass `phase1-report.md`.
+- **Turn 3b:** read `{resolved_path}/dedup-and-assembly.md` while waiting, as V4 says.
+- **Turn 4:** run V4's dedup + gate as-is (intra-phase; cross-phase dedup is Turn 3
+  below). It writes `run-1.md` and prints no report — that is correct, do not print
+  one yourself.
+- **Turn 5 — output target.** Run `assemble.sh` as V4 says, then copy the WHOLE
+  assembled file: `cp .solidity-auditor/runs/{stamp}/full-report.md
+  {audit_dir}/phase2-report.md`. When V4's >20-findings size trigger fires, its
+  terminal output is a 3-row slice — Turn 3 reads the copied file, never the
+  terminal. If `assemble.sh` exits non-zero, print its stderr and stop the audit;
+  do not hand-compose a phase-2 report. Turn 5 step 5 deletes V4's `{bundle_dir}` —
+  fine; never delete `{audit_dir}`. The `.solidity-auditor/runs/` directory V4 writes
+  inside the target clone is transient VM state; leave it, do not commit it.
+- **Unchanged from V3:** confidence is not severity — Turn 3 still assigns severity.
+  Note V4 lowered the Fix-block threshold from 80 to 75, so more phase-2 findings
+  arrive with a diff; Turn 3 keeps them verbatim (fix preservation).
+
+Plus, on top of the above:
 
 - **Inject `{xray_invariants}` into the 12 attack agents (NEW in v3)**, framed as:
   *"Invariant catalog from a mechanical pre-scan. These are CANDIDATES, not
