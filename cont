@@ -19,14 +19,16 @@ set -euo pipefail
 # never harvested back out of the VM and the login dies with it. Same
 # shim agent-wrangler.sh carries, for the same reason.
 if ! command -v timeout >/dev/null 2>&1; then
+  # `python3 -c`, not a heredoc: a heredoc takes over stdin, and cmd_stage
+  # pipes its tar stream through `timeout ... ssh` (that silently shipped
+  # nothing, so every bounce re-stage failed).
   timeout() {
-    python3 - "$@" <<'PY'
+    python3 -c '
 import subprocess, sys
 try:
     sys.exit(subprocess.run(sys.argv[2:], timeout=float(sys.argv[1])).returncode)
 except subprocess.TimeoutExpired:
-    sys.exit(124)
-PY
+    sys.exit(124)' "$@"
   }
 fi
 
@@ -425,6 +427,10 @@ cmd_auth() {
   local sub="${1:-ensure}"
   case "$sub" in
     ensure)
+      if token_mode; then
+        echo "claude: token mode ($(tokens_file))"
+        return 0
+      fi
       if has_valid_claude_token; then
         echo "claude oauth token: ok ($CLAUDE_TOKEN_FILE)"
         return 0
@@ -742,15 +748,24 @@ cmd_stage() {
   local name="$1"
   vm_running "$name" || { echo "stage: $name not running — boot it first" >&2; return 1; }
   ensure_sshpass
-  # Refresh the staged copies from the selected login's live store so the
-  # guest gets the CURRENT lineage tip, not whatever was staged last.
-  local fresh
-  if fresh="$(read_claude_token_from_keychain 2>/dev/null)"; then
-    save_claude_token "$fresh"
+  # Token mode: keep the token the provision picked (else pick one) and
+  # ship just that — no blob, no custody.
+  local tname=""
+  if token_mode; then
+    tname="$(cat "$VM_TOKENS_DIR/$name" 2>/dev/null || true)"
+    [[ -n "$tname" ]] && token_value "$tname" >/dev/null || tname="$(token_pick || true)"
   fi
-  save_claude_credentials_blob >/dev/null 2>&1 || true
+  if [[ -z "$tname" ]]; then
+    # Refresh the staged copies from the selected login's live store so the
+    # guest gets the CURRENT lineage tip, not whatever was staged last.
+    local fresh
+    if fresh="$(read_claude_token_from_keychain 2>/dev/null)"; then
+      save_claude_token "$fresh"
+    fi
+    save_claude_credentials_blob >/dev/null 2>&1 || true
+  fi
   save_claude_account_blob >/dev/null 2>&1 || true
-  if [[ ! -f "$CLAUDE_CREDS_FILE" ]]; then
+  if [[ -z "$tname" && ! -f "$CLAUDE_CREDS_FILE" ]]; then
     echo "stage: no credential blob for the selected login — nothing to ship" >&2
     return 1
   fi
@@ -767,8 +782,12 @@ cmd_stage() {
   )
   local stage; stage="$(mktemp -d)"
   trap "rm -rf '$stage'" RETURN
-  cp "$CLAUDE_CREDS_FILE" "$stage/cont-claude-credentials.json"
-  [[ -f "$CLAUDE_TOKEN_FILE" ]]   && cp "$CLAUDE_TOKEN_FILE"   "$stage/cont-claude-token"
+  if [[ -n "$tname" ]]; then
+    ( umask 077; token_value "$tname" > "$stage/cont-claude-token" )
+  else
+    cp "$CLAUDE_CREDS_FILE" "$stage/cont-claude-credentials.json"
+    [[ -f "$CLAUDE_TOKEN_FILE" ]] && cp "$CLAUDE_TOKEN_FILE" "$stage/cont-claude-token"
+  fi
   [[ -f "$CLAUDE_ACCOUNT_FILE" ]] && cp "$CLAUDE_ACCOUNT_FILE" "$stage/cont-claude-account.json"
   cat > "$stage/cont-stage-install.sh" <<'EOS'
 #!/bin/bash
@@ -776,19 +795,24 @@ set -euo pipefail
 CREDS_FILE="/tmp/cont-claude-credentials.json"
 ACCOUNT_FILE="/tmp/cont-claude-account.json"
 TOKEN_FILE="/tmp/cont-claude-token"
-[[ -f "$CREDS_FILE" ]] || { echo "stage-install: no creds file shipped" >&2; exit 1; }
-CREDS_JSON="$(cat "$CREDS_FILE")"
+[[ -f "$CREDS_FILE" || -f "$TOKEN_FILE" ]] || { echo "stage-install: no creds file shipped" >&2; exit 1; }
 security unlock-keychain -p "admin" "$HOME/Library/Keychains/login.keychain-db" 2>/dev/null || true
 security delete-generic-password -s "Claude Code-credentials" -a "$USER" \
   "$HOME/Library/Keychains/login.keychain-db" >/dev/null 2>&1 || true
-security add-generic-password -A -s "Claude Code-credentials" -a "$USER" \
-  -w "$CREDS_JSON" "$HOME/Library/Keychains/login.keychain-db"
-security set-generic-password-partition-list -S "apple-tool:,apple:,teamid:" \
-  -k "admin" -s "Claude Code-credentials" -a "$USER" \
-  "$HOME/Library/Keychains/login.keychain-db" >/dev/null
-mkdir -p "$HOME/.claude"
-printf '%s' "$CREDS_JSON" > "$HOME/.claude/.credentials.json"
-chmod 600 "$HOME/.claude/.credentials.json"
+if [[ -f "$CREDS_FILE" ]]; then
+  CREDS_JSON="$(cat "$CREDS_FILE")"
+  security add-generic-password -A -s "Claude Code-credentials" -a "$USER" \
+    -w "$CREDS_JSON" "$HOME/Library/Keychains/login.keychain-db"
+  security set-generic-password-partition-list -S "apple-tool:,apple:,teamid:" \
+    -k "admin" -s "Claude Code-credentials" -a "$USER" \
+    "$HOME/Library/Keychains/login.keychain-db" >/dev/null
+  mkdir -p "$HOME/.claude"
+  printf '%s' "$CREDS_JSON" > "$HOME/.claude/.credentials.json"
+  chmod 600 "$HOME/.claude/.credentials.json"
+else
+  # Token only: drop any old login so nothing refreshes a stale lineage.
+  rm -f "$HOME/.claude/.credentials.json"
+fi
 if [[ -f "$ACCOUNT_FILE" ]]; then
   python3 - "$ACCOUNT_FILE" "$HOME/.claude.json" <<'PY'
 import json, os, sys
@@ -821,6 +845,12 @@ EOS
   if ! timeout 30 sshpass -p "$SSH_PASS" ssh -n "${ssh_opts[@]}" "$SSH_USER@$ip" \
       "bash /tmp/cont-stage-install.sh"; then
     echo "stage: guest install failed in $name" >&2; return 1
+  fi
+  if [[ -n "$tname" ]]; then
+    ( umask 077; printf '%s' "$tname" > "$VM_TOKENS_DIR/$name" )
+    rm -f "$VM_ACCOUNTS_DIR/$name"
+    echo "stage: $name now rides token $tname"
+    return 0
   fi
   # This VM now rides the selected login: all host-side refresh paths skip
   # it until cmd_down harvests (or keepalive reclaims) + releases.
@@ -934,6 +964,9 @@ except Exception:
 }
 
 account_keepalive() {
+  # Token mode: the fleet doesn't use the OAuth logins, so don't ping them
+  # or alert on them — just check the tokens.
+  if token_mode; then token_keepalive; return; fi
   local d name out vm dead=0
   while IFS= read -r d; do
     [[ "$d" == "-" ]] && d=""
@@ -1108,6 +1141,161 @@ account_auto() {
   [[ "$best_dir" == "$cur" ]] && return 1
   account_switch "$best_dir" >&2 || return 1
   claude_src_name
+}
+
+# ── Long-lived subscription tokens ("token mode", 2026-10-13) ──────────
+# `claude setup-token` mints a 1-YEAR token per subscription: no refresh,
+# no rotation, no 28-day family death. So none of the custody / harvest /
+# keepalive machinery above applies to them, and every "login DEAD" /
+# "hard-expires" alert it exists for goes away. When this box has them,
+# VMs ride a token as CLAUDE_CODE_OAUTH_TOKEN (no keychain blob shipped)
+# and the OAuth login dirs are left alone.
+# Tokens live in a gitignored env file as CLAUDE_TOKEN_<NAME>=sk-ant-oat…
+# — normally the harness's .clawd-harness.env (put there by its
+# tools/install_claude_tokens.py). This repo is public: never copy them
+# anywhere tracked. CONT_TOKENS=0 forces the old login path.
+VM_TOKENS_DIR="$CONFIG_DIR/vm-tokens"
+mkdir -p "$VM_TOKENS_DIR"
+
+tokens_file() {
+  local f
+  for f in "${CONT_CLAUDE_TOKENS_FILE:-}" "$CONFIG_DIR/claude-tokens.env" \
+           "$SCRIPT_DIR/../../.clawd-harness.env" \
+           "$HOME/clawd/clawd-harness/.clawd-harness.env" \
+           "$HOME/clawd-harness/.clawd-harness.env"; do
+    [[ -n "$f" && -f "$f" ]] || continue
+    if grep -qE '^CLAUDE_TOKEN_[A-Z0-9_]+=sk-ant-oat' "$f" 2>/dev/null; then
+      printf '%s\n' "$f"; return 0
+    fi
+  done
+  return 1
+}
+
+token_mode() { [[ "${CONT_TOKENS:-1}" != "0" ]] && tokens_file >/dev/null; }
+
+token_value() {  # $1 = token name (e.g. SLOP_BUIDLGUIDL)
+  local f; f="$(tokens_file)" || return 1
+  sed -n "s/^CLAUDE_TOKEN_$1=\(sk-ant-oat[^[:space:]]*\).*/\1/p" "$f" | head -1 | grep . 
+}
+
+# Tokens held by RUNNING VMs, one name per line.
+tokens_busy() {
+  local f vm
+  for f in "$VM_TOKENS_DIR"/*; do
+    [[ -f "$f" ]] || continue
+    vm="$(basename "$f")"
+    if vm_running "$vm"; then cat "$f"; echo; fi
+  done
+}
+
+# Probe every token (1-token haiku call, read the unified rate-limit
+# headers; the usage endpoint refuses setup-tokens). One line per token:
+#   NAME STATUS HEADROOM RESET_EPOCH
+# STATUS ok | dead (401/403 — revoked/expired, mint a new one) |
+# limited (429) | err. HEADROOM = 100 - worst of the 5h/7d windows.
+token_report() {
+  local f; f="$(tokens_file)" || return 1
+  python3 - "$f" <<'PY'
+import json, re, sys, urllib.request, urllib.error
+from concurrent.futures import ThreadPoolExecutor
+toks = re.findall(r'^CLAUDE_TOKEN_([A-Z0-9_]+)=(sk-ant-oat\S+)', open(sys.argv[1]).read(), re.M)
+body = json.dumps({"model": "claude-haiku-4-5-20251001", "max_tokens": 1,
+    "system": "You are Claude Code, Anthropic's official CLI for Claude.",
+    "messages": [{"role": "user", "content": "hi"}]}).encode()
+def probe(nt):
+    name, tok = nt
+    req = urllib.request.Request("https://api.anthropic.com/v1/messages", data=body, headers={
+        "Authorization": "Bearer " + tok, "anthropic-beta": "oauth-2025-04-20",
+        "anthropic-version": "2023-06-01", "content-type": "application/json",
+        "User-Agent": "claude-cli/2.1.291 (external, cli)"})
+    try:
+        r = urllib.request.urlopen(req, timeout=20); code, h = r.status, r.headers
+    except urllib.error.HTTPError as e:
+        code, h = e.code, e.headers
+    except Exception:
+        return f"{name} err 0 0"
+    if code in (401, 403):
+        return f"{name} dead 0 0"
+    worst, reset = None, 0
+    for w in ("5h", "7d"):
+        u = h.get(f"anthropic-ratelimit-unified-{w}-utilization")
+        if u is None:
+            continue
+        u = float(u)
+        if worst is None or u > worst:
+            worst, reset = u, int(h.get(f"anthropic-ratelimit-unified-{w}-reset") or 0)
+    if code == 429:
+        # Window walled = 0 headroom; a bare 429 with no headers is a
+        # transient rate limit, not a verdict on the subscription.
+        return f"{name} limited 0 {reset}" if worst is not None else f"{name} err 0 0"
+    if code != 200:
+        return f"{name} err 0 0"
+    return f"{name} ok {round(100 - 100 * (worst or 0))} {reset}"
+with ThreadPoolExecutor(8) as ex:
+    for line in ex.map(probe, toks):
+        print(line)
+PY
+}
+
+# Pick the token for a new VM: the most headroom among tokens no running
+# VM holds, and at least CONT_MIN_HEADROOM (same floor and same "never
+# stack on a busy sub" rule as `account auto`). If nothing clears that,
+# fall back to the best live token anyway — a VM with a token beats a VM
+# with none (the wrangler's usage gate is what pauses the fleet).
+token_pick() {
+  local min="${CONT_MIN_HEADROOM:-15}" busy
+  busy="$(tokens_busy | tr '\n' ' ')"
+  token_report | awk -v min="$min" -v busy=" $busy " '
+    $2 == "ok" {
+      free = index(busy, " " $1 " ") == 0
+      if (free && $3 >= min && $3 > bf) { bf = $3; bn = $1 }
+      if ($3 > ba || an == "") { ba = $3; an = $1 }
+    }
+    END { if (bn != "") print bn; else if (an != "") print an; else exit 1 }'
+}
+
+token_keepalive() {
+  local name st rest dead=0
+  while read -r name st rest; do
+    case "$st" in
+      ok)      echo "OK   token $name — headroom ${rest%% *}%" ;;
+      dead)    echo "DEAD token $name — revoked or expired; mint a new one (claude setup-token)"
+               keepalive_notify "token-$name" \
+                 "🔴 Claude token '$name' is dead (401) — Austin: run \`claude setup-token\` on that account and re-install the tokens"
+               dead=1 ;;
+      *)       echo "WARN token $name — probe $st (transient)" ;;
+    esac
+  done < <(token_report)
+  return "$dead"
+}
+
+cmd_token() {
+  local sub="${1:-list}"
+  case "$sub" in
+    mode)  token_mode && echo "token mode ($(tokens_file))" || { echo "login mode"; return 1; } ;;
+    list)
+      token_mode || { echo "no tokens on this box (login mode)"; return 1; }
+      local busy name st hr reset when held
+      busy="$(for f in "$VM_TOKENS_DIR"/*; do [[ -f "$f" ]] && vm_running "$(basename "$f")" && printf '%s=%s ' "$(cat "$f")" "$(basename "$f")"; done; true)"
+      while read -r name st hr reset; do
+        when="-"; (( reset > 0 )) && when="$(date -r "$reset" '+%a %H:%M')"
+        held="$(printf '%s' "$busy" | tr ' ' '\n' | sed -n "s/^$name=//p" | paste -sd, -)"
+        printf '%-22s %-8s headroom %3s%%  resets %-10s %s\n' "$name" "$st" "$hr" "$when" "${held:+in use by $held}"
+      done < <(token_report)
+      ;;
+    pick)  token_pick ;;
+    value) [[ -n "${2:-}" ]] || { echo "usage: cont token value <NAME>" >&2; return 2; }; token_value "$2" ;;
+    check) token_report | awk '$2=="ok"||$2=="limited"{f=1} END{exit !f}' ;;
+    usage)
+      # "ok" if some token clears the floor, else "exhausted <earliest reset>".
+      token_report | awk -v min="${CONT_MIN_HEADROOM:-15}" '
+        $2=="ok" && $3>=min {ok=1}
+        ($2=="ok"||$2=="limited") && $4>0 && (r==0 || $4<r) {r=$4}
+        END { if (ok || NR==0) print "ok"; else if (r) { cmd="date -u -r " r " +%Y-%m-%dT%H:%M:%SZ"; cmd | getline t; print "exhausted " t } else print "ok" }'
+      ;;
+    keepalive) token_keepalive ;;
+    *) echo "usage: cont token [list|mode|pick|value <NAME>|check|usage|keepalive]" >&2; return 2 ;;
+  esac
 }
 
 cmd_account() {
@@ -1408,8 +1596,23 @@ cmd_provision() {
     cp -a "$script_dir/$d" "$stage/$d"
   done
 
-  # Claude credentials → renamed in staging dir
-  if [[ -f "$CLAUDE_TOKEN_FILE" || -f "$CLAUDE_CREDS_FILE" ]]; then
+  # Claude credentials → renamed in staging dir. Token mode ships ONLY a
+  # 1-year token (cont-claude-token, no keychain blob): the guest wipes any
+  # old login off its disk and runs on CLAUDE_CODE_OAUTH_TOKEN.
+  local tname=""
+  if token_mode && tname="$(token_pick)" && [[ -n "$tname" ]]; then
+    # Harvest first if the disk still rides an old OAuth login — the guest
+    # is about to delete that blob, and it may be the lineage tip.
+    if [[ -f "$VM_ACCOUNTS_DIR/$name" ]] && vm_running "$name"; then
+      cmd_harvest "$name" || true
+    fi
+    rm -f "$VM_ACCOUNTS_DIR/$name"
+    ( umask 077; token_value "$tname" > "$stage/cont-claude-token" )
+    save_claude_account_blob >/dev/null 2>&1 || true
+    [[ -f "$CLAUDE_ACCOUNT_FILE" ]] && cp "$CLAUDE_ACCOUNT_FILE" "$stage/cont-claude-account.json"
+    ( umask 077; printf '%s' "$tname" > "$VM_TOKENS_DIR/$name" )
+    echo "==> $name rides token $tname"
+  elif [[ -f "$CLAUDE_TOKEN_FILE" || -f "$CLAUDE_CREDS_FILE" ]]; then
     save_claude_credentials_blob >/dev/null 2>&1 || true
     save_claude_account_blob >/dev/null 2>&1 || true
     local fresh
@@ -1417,14 +1620,17 @@ cmd_provision() {
       save_claude_token "$fresh"
     fi
   fi
-  [[ -f "$CLAUDE_TOKEN_FILE" ]]   && cp "$CLAUDE_TOKEN_FILE"   "$stage/cont-claude-token"
-  [[ -f "$CLAUDE_CREDS_FILE" ]]   && cp "$CLAUDE_CREDS_FILE"   "$stage/cont-claude-credentials.json"
-  [[ -f "$CLAUDE_ACCOUNT_FILE" ]] && cp "$CLAUDE_ACCOUNT_FILE" "$stage/cont-claude-account.json"
+  if [[ -z "$tname" ]]; then
+    [[ -f "$CLAUDE_TOKEN_FILE" ]]   && cp "$CLAUDE_TOKEN_FILE"   "$stage/cont-claude-token"
+    [[ -f "$CLAUDE_CREDS_FILE" ]]   && cp "$CLAUDE_CREDS_FILE"   "$stage/cont-claude-credentials.json"
+    [[ -f "$CLAUDE_ACCOUNT_FILE" ]] && cp "$CLAUDE_ACCOUNT_FILE" "$stage/cont-claude-account.json"
 
-  # Record credential custody: this VM now rides the selected login. All
-  # host-side refresh paths skip it until cmd_down harvests + releases.
-  if [[ -f "$stage/cont-claude-credentials.json" || -f "$stage/cont-claude-token" ]]; then
-    ( umask 077; printf '%s' "$(claude_src_dir)" > "$VM_ACCOUNTS_DIR/$name" )
+    # Record credential custody: this VM now rides the selected login. All
+    # host-side refresh paths skip it until cmd_down harvests + releases.
+    if [[ -f "$stage/cont-claude-credentials.json" || -f "$stage/cont-claude-token" ]]; then
+      ( umask 077; printf '%s' "$(claude_src_dir)" > "$VM_ACCOUNTS_DIR/$name" )
+      rm -f "$VM_TOKENS_DIR/$name"
+    fi
   fi
 
   # Ship it — ONE ssh connection, ONE tar stream, with retry
@@ -1537,6 +1743,9 @@ cont — programmatic macOS-on-macOS environments via tart
   cont reclaim <name>         recover a login stranded in a STOPPED custody
                               VM: boot, grab the blob, stop immediately,
                               adopt; runs automatically from keepalive/rm
+  cont token [list]           1-year subscription tokens (token mode): headroom
+                              per token + which VM holds it; also pick|usage|
+                              check|keepalive|mode
   cont stage <name>           re-stage the SELECTED login's credential into
                               a RUNNING VM + record custody; the wrangler
                               runs it after every bounce (`cont up` on an
@@ -1568,6 +1777,7 @@ main() {
     base)     cmd_base "$@" ;;
     auth)     cmd_auth "$@" ;;
     account)  cmd_account "$@" ;;
+    token|tokens) cmd_token "$@" ;;
     harvest)  cmd_harvest "$@" ;;
     stage)    cmd_stage "$@" ;;
     reclaim)  require_name "${1:-}"; reclaim_vm "$1" ;;

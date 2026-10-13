@@ -37,6 +37,13 @@ done
 JOB_DIR="$HERE/jobs/$JOB_ID"; mkdir -p "$JOB_DIR"
 export JOB_ID JOB_DIR HERE REPO_ROOT LC BG SKILLS GO
 
+# Run claude on a 1-year subscription token when this box has them
+# (`cont token`) — no login to expire mid-audit.
+if [[ -z "${CLAUDE_CODE_OAUTH_TOKEN:-}" ]] && _tok="$("$REPO_ROOT/cont" token pick 2>/dev/null)"; then
+  CLAUDE_CODE_OAUTH_TOKEN="$("$REPO_ROOT/cont" token value "$_tok")" && export CLAUDE_CODE_OAUTH_TOKEN
+  unset ANTHROPIC_API_KEY
+fi
+
 # shellcheck source=lib/state.sh
 source "$HERE/lib/state.sh"
 source "$HERE/lib/sandbox.sh"

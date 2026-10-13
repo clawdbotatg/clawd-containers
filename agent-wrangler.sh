@@ -361,6 +361,10 @@ HOST_OAUTH_CACHE_SECONDS="${HOST_OAUTH_CACHE_SECONDS:-300}"
 # gates watch one account while the VMs burn another.
 fleet_claude_dir() { ./cont account dir 2>/dev/null || true; }
 fleet_claude_blob() { ./cont account blob 2>/dev/null || true; }
+# Token mode (`cont token`): VMs ride 1-year setup-tokens, so the gates
+# below check the tokens instead of the selected OAuth login, and there's
+# no custody hop / account auto to do.
+fleet_token_mode() { ./cont token mode >/dev/null 2>&1; }
 
 # Seconds until the selected account's Claude token expires. Prints an
 # integer (may be negative if expired); nothing if missing/unreadable.
@@ -388,6 +392,14 @@ host_oauth_ok() {
       [[ "$(cat "$cache" 2>/dev/null)" == "ok" ]]
       return $?
     fi
+  fi
+
+  if fleet_token_mode; then
+    date +%s > "$stamp"
+    if ./cont token check >/dev/null 2>&1; then echo "ok" > "$cache"; return 0; fi
+    echo "fail" > "$cache"
+    log "STUCK: every Claude token is dead or unreachable (cont token list)"
+    return 1
   fi
 
   # Healthy path: keychain token still valid (>2 min headroom). Deterministic,
@@ -476,6 +488,14 @@ host_usage_state() {
     fi
   fi
   local out
+  if fleet_token_mode; then
+    out=$(./cont token usage 2>/dev/null) || true
+    [[ -z "$out" ]] && out="ok"
+    date +%s > "$stamp"
+    printf '%s\n' "$out" > "$cache"
+    printf '%s\n' "$out"
+    return 0
+  fi
   out=$(fleet_claude_blob | python3 -c '
 import json, sys, urllib.request
 try:
@@ -1051,7 +1071,9 @@ start_vm() {
   # other login has headroom the selection stays shared — logged, and
   # the harvest still recovers the likely rotation.
   local _hop
-  if _hop=$(./cont account auto 2>>"$LOG") && [[ -n "$_hop" ]]; then
+  if fleet_token_mode; then
+    :  # tokens don't rotate — nothing to hop away from
+  elif _hop=$(./cont account auto 2>>"$LOG") && [[ -n "$_hop" ]]; then
     log "  custody hop: fleet account -> '$_hop' ($vm keeps the previous login)"
     rm -f "$STATE_DIR/host_oauth.status" "$STATE_DIR/host_oauth.checked-at" \
           "$STATE_DIR/host_usage.state" "$STATE_DIR/host_usage.checked-at"
@@ -1197,7 +1219,7 @@ while :; do
   # (2026-08-04: fleet sat STUCK on one dead login for hours while five
   # healthy logins idled at 54-100% headroom.)
   if ! host_oauth_ok; then
-    if hopped=$(./cont account auto 2>>"$LOG") && [[ -n "$hopped" ]]; then
+    if ! fleet_token_mode && hopped=$(./cont account auto 2>>"$LOG") && [[ -n "$hopped" ]]; then
       rm -f "$STATE_DIR/host_oauth.status" "$STATE_DIR/host_oauth.checked-at" \
             "$STATE_DIR/host_usage.state" "$STATE_DIR/host_usage.checked-at"
       log "host claude OAuth dead on selected login — auto-hopped fleet account to '$hopped'"
@@ -1226,7 +1248,7 @@ while :; do
   # we wait it out; notify only on state transitions.
   usage=$(host_usage_state)
   if [[ "$usage" == exhausted* ]]; then
-    if hopped=$(./cont account auto 2>>"$LOG") && [[ -n "$hopped" ]]; then
+    if ! fleet_token_mode && hopped=$(./cont account auto 2>>"$LOG") && [[ -n "$hopped" ]]; then
       log "usage window exhausted — auto-hopped fleet account to '$hopped'"
       notify "🔄 Claude usage limit hit — fleet hopped to account '$hopped'; jobs continue"
       rm -f "$STATE_DIR/host_usage.state" "$STATE_DIR/host_usage.checked-at" \

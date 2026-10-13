@@ -23,6 +23,8 @@ cont spec <name> cpu=8 memory=16384   # persisted; survives reset (raw `tart set
 cont account [list|auto|<name>|default]  # which Claude login the fleet ships into VMs
                                          # (a ~/.clawd-accounts/<name> dir or default ~/.claude);
                                          # auto = hop to the login with the most usage headroom
+cont token [list]            # 1-year setup-tokens (token mode): headroom per sub,
+                             # which VM holds which; see "Token mode" below
 cont down <name>             # stop
 cont rm <name>               # delete
 cont list                    # all VMs + status
@@ -94,6 +96,22 @@ cont reset dev                   # spec re-applied automatically
     keychain service and refresh both) — OAuth refresh rotates the refresh token and the
     stale copy dies. Refresh only via a real `claude -p` ping under that account's
     `CLAUDE_CONFIG_DIR` (`claude_ping_dir`), never a hand-rolled token call.
+
+## Token mode — VMs ride 1-year tokens (2026-10-13)
+
+When the box has `CLAUDE_TOKEN_<NAME>=sk-ant-oat…` lines (from `claude
+setup-token`, valid 1 year) in the harness's gitignored
+`.clawd-harness.env` (or `~/.config/cont/claude-tokens.env`), `cont` is in
+**token mode**: each VM boot picks the token with the most headroom that no
+running VM holds, ships it as `CLAUDE_CODE_OAUTH_TOKEN`, and the guest
+deletes any old keychain login. No refresh, no custody, no harvest, no
+28-day expiry — and keepalive checks the tokens instead of pinging/alerting
+on the OAuth login dirs. The wrangler's auth + usage gates read the tokens
+(`cont token check` / `cont token usage`); host-auditor uses one too.
+Everything about OAuth logins below only applies in login mode
+(`CONT_TOKENS=0`, or no tokens on the box). Install tokens on a box with the
+harness's `tools/install_claude_tokens.py`. **Never put a token in this repo
+— it's public.**
 
 ## Deploy = `git push` (the wrangler pulls itself)
 

@@ -143,6 +143,15 @@ if [[ -f "$CREDS_FILE" ]]; then
   chmod 600 "$HOME/.claude/.credentials.json"
   rm -f "$CREDS_FILE"
   unset CREDS_JSON
+elif [[ -f /tmp/cont-claude-token ]]; then
+  # Token mode (host shipped a 1-year setup-token, no blob): delete any old
+  # login baked into this disk so claude can't refresh a stale lineage.
+  # CLAUDE_CODE_OAUTH_TOKEN (written below) is all it needs.
+  echo "==> token mode: removing any old Claude login from the keychain"
+  security unlock-keychain -p "admin" "$HOME/Library/Keychains/login.keychain-db" 2>/dev/null || true
+  security delete-generic-password -s "Claude Code-credentials" -a "$USER" \
+    "$HOME/Library/Keychains/login.keychain-db" >/dev/null 2>&1 || true
+  rm -f "$HOME/.claude/.credentials.json"
 else
   echo "==> no $CREDS_FILE — run 'cont auth' on the host, then re-provision"
 fi
