@@ -1497,6 +1497,22 @@ cmd_clone() {
   cmd_snapshot "$@"
 }
 
+# What the host sees of a guest IP it can't reach. The fresh-process nc
+# separates a block on THIS process tree from a host-wide network fault.
+net_diag() {
+  local ip="$1" out lbl="cont.netdiag.$$"
+  echo "--- net diag $ip ---"
+  route -n get "$ip" 2>&1 | grep -E 'interface|flags|gateway' | tr -s ' '
+  arp -n "$ip" 2>&1
+  ifconfig bridge100 2>&1 | grep -E 'flags|inet ' | tr -s ' '
+  if ping -c1 -t2 "$ip" >/dev/null 2>&1; then echo "ping: ok"; else echo "ping: fail"; fi
+  out="$(mktemp)"
+  launchctl submit -l "$lbl" -o "$out" -e "$out" -- /bin/bash -c "nc -z -G 3 $ip 22; echo fresh-process nc rc=\$?" 2>/dev/null
+  sleep 6
+  launchctl remove "$lbl" 2>/dev/null || true
+  cat "$out" 2>/dev/null; rm -f "$out"
+}
+
 cmd_ip() {
   require_name "${1:-}"
   tart ip "$1"
@@ -1540,8 +1556,26 @@ cmd_provision() {
   # Let sshd fully settle before we touch it. Every SSH connection counts
   # against macOS's rate limiter, so no separate probe — go straight into
   # the tar transfer with retries.
-  echo "==> waiting 10s for $name ($ip) sshd to settle ..."
-  sleep 10
+  # Wait for port 22 itself (nc never reaches sshd while it's unreachable,
+  # so this doesn't feed the rate limiter), re-reading the IP each pass.
+  # 2026-10-15..17 on clawd-leftclaw every start died "No route to host"
+  # 10s after boot while the guest held that very DHCP lease, and a probe
+  # later reached a fresh clone in 12s — so on failure, log what the host
+  # sees, including from a fresh process (a per-process macOS Local
+  # Network block looks exactly like this).
+  echo "==> waiting for $name ($ip) port 22 ..."
+  local _t0=$SECONDS _nip
+  until nc -z -G 3 "$ip" 22 2>/dev/null; do
+    if (( SECONDS - _t0 >= ${CONT_SSH_WAIT:-120} )); then
+      echo "error: $name ($ip) port 22 unreachable after $(( SECONDS - _t0 ))s" >&2
+      net_diag "$ip" >&2
+      break
+    fi
+    sleep 3
+    _nip="$(tart ip "$name" 2>/dev/null || true)"
+    if [[ -n "$_nip" && "$_nip" != "$ip" ]]; then echo "    ip changed: $ip -> $_nip"; ip="$_nip"; fi
+  done
+  sleep 5   # sshd accepts a beat before it's ready for a session
 
   # ── SSH helpers (plain sshpass, no multiplexing) ────────────────────
   # sshpass + ControlMaster doesn't work (sshpass can't handle -fN).

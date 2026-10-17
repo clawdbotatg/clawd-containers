@@ -206,6 +206,20 @@ reset_all_failures() {
   : > "$FAILURES_FILE"
 }
 
+# One 🔴 per failure STREAK, not per attempt (Austin, 10-17: eight alerts
+# every 30 min for jobs 1017/1018). start_vm records what broke; the call
+# site alerts once, then stays quiet until a start succeeds or the queue
+# empties. Kept out of $FAILURES_FILE — any stop_vm wipes that.
+START_ALERT_FILE="$STATE_DIR/start_alerted.txt"
+START_FAIL_DESC=""; START_FAIL_REASON=""
+start_fail() {  # start_fail <step> <desc>
+  local why
+  why=$(tail -60 "$LOG" | grep -E -i 'no route|error|refused|timed out|denied|limit|unreachable' \
+        | grep -v -E '^\[' | tail -1 | cut -c1-200)
+  START_FAIL_DESC="$2"
+  START_FAIL_REASON="cont $1 failed${why:+: $why}"
+}
+
 log() {
   # >&2: several helpers (job_advanceable via count_advanceable_open) run
   # inside $(...) command substitutions — log lines on stdout would be
@@ -983,14 +997,14 @@ start_vm() {
         log "  cont provision failed — cleaning up zombie VM"
         ./cont down "$vm" >>"$LOG" 2>&1 || true
         ./cont rm "$vm"   >>"$LOG" 2>&1 || true
-        notify "🔴 ${vm} failed to start ${desc}"
+        start_fail "provision" "$desc"
         return 1
       fi
     elif ! AGENT_ENV_FILE="$env" ./cont sync "$vm" "./$prov" >>"$LOG" 2>&1; then
       log "  cont sync failed — cleaning up zombie VM"
       ./cont down "$vm" >>"$LOG" 2>&1 || true
       ./cont rm "$vm"   >>"$LOG" 2>&1 || true
-      notify "🔴 ${vm} failed to start ${desc}"
+      start_fail "sync" "$desc"
       return 1
     fi
   else
@@ -1001,7 +1015,7 @@ start_vm() {
       log "  cont provision failed — cleaning up zombie VM"
       ./cont down "$vm" >>"$LOG" 2>&1 || true
       ./cont rm "$vm"   >>"$LOG" 2>&1 || true
-      notify "🔴 ${vm} failed to start ${desc}"
+      start_fail "provision" "$desc"
       return 1
     fi
   fi
@@ -1024,7 +1038,7 @@ start_vm() {
   sleep 3
   if ! ./cont up "$vm" >>"$LOG" 2>&1; then
     log "  cont up failed (tart 2-VM cap?) — see $LOG"
-    notify "🔴 ${vm} failed to start ${desc}"
+    start_fail "up" "$desc"
     return 1
   fi
   # Post-bounce verification (auditor instances): the provisioned agent env
@@ -1452,20 +1466,25 @@ while :; do
           fi
           if start_vm "$vm" "$prov" "$svc" "$env" "$mine"; then
             kv_set "$vm" 0 "$FAILURES_FILE"
+            kv_set "$vm" 0 "$START_ALERT_FILE"
           else
             new_fails=$(( fails + 1 ))
             kv_set "$vm" "$new_fails" "$FAILURES_FILE"
             kv_set "$vm.lastfail" "$(date +%s)" "$FAILURES_FILE"
-            log "$vm: start failed (${new_fails}/${MAX_START_RETRIES}); will retry next tick"
+            log "$vm: start failed (${new_fails}/${MAX_START_RETRIES}): ${START_FAIL_REASON}"
             if (( new_fails >= MAX_START_RETRIES )); then
-              log "WARNING: $vm hit ${MAX_START_RETRIES} consecutive start failures — backing off until queue empties"
-              notify "🔴 ${vm} failed to start ${MAX_START_RETRIES} times in a row — backing off until queue empties"
+              log "WARNING: $vm hit ${MAX_START_RETRIES} consecutive start failures — backing off ${BACKOFF_RESET_SECONDS}s"
+            fi
+            if [[ "$(kv_get "$vm" "$START_ALERT_FILE")" == 0 ]]; then
+              notify "🔴 ${vm} can't start ${START_FAIL_DESC} — ${START_FAIL_REASON}. Retrying quietly; next message when it starts."
+              kv_set "$vm" 1 "$START_ALERT_FILE"
             fi
           fi
         fi
       else
         log "$vm: idle (type-$svc mine=$mine open=$open)"
         kv_set "$vm" 0 "$FAILURES_FILE"
+        if [[ "$(kv_get "$vm" "$START_ALERT_FILE")" != 0 ]]; then kv_set "$vm" 0 "$START_ALERT_FILE"; fi
       fi
     fi
   done
