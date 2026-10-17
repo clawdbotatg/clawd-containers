@@ -146,11 +146,12 @@ The full incident, how the gate measures, and its calibration set live in
 **[`SCOPE-GATE.md`](SCOPE-GATE.md)** — read that before touching
 `scripts/audit/complexity-check.sh`.
 
-**No ssh route to clawd-sat / clawd-leftclaw from clawd-head** (their
-`.local` names don't resolve off-LAN). They can still be driven, through the
-fleet controller's tool API on the relay box. The runbook is deliberately not
-written down here — **this repo is public** — it's in the private fleet memory;
-ask Austin.
+**SSH WORKS to both other boxes from clawd-head — use it, don't claim otherwise:**
+`ssh leftclaw` (clawd-leftclaw) and `ssh sat` (clawd-sat), aliases in
+`~/.ssh/config`. Wrangler checkout on each: `~/clawd/clawd-harness/projects/clawd-containers`;
+log: `/tmp/agent-wrangler.out` and `/tmp/agent-wrangler.log`. (An older note here said there
+was no route; that was wrong and cost hours. Fallback only if ssh really fails: the
+fleet controller's tool API on the relay — private fleet memory.)
 
 **Before changing `scripts/audit/complexity-check.sh`, run
 `python3 tests/test_scope_gate.py`** (offline, ~1s). That gate refunds paying
