@@ -64,8 +64,9 @@ const norm = raw => (/^info/i.test(raw) ? "Info" : raw[0].toUpperCase() + raw.sl
 // colon sits inside or outside the bold depending on the writer.
 const tally = md.match(/\*\*Severity (?:counts|tally)\b:?\*\*:?\s*([^\n]+)|\*\*Severity (?:counts|tally)\b:?\s*([^*\n]+)\*\*/i);
 if (tally) {
-  for (const m of (tally[1] || tally[2] || "").matchAll(/(\d+)\s*(Critical|High|Medium|Low|Informational|Info)\b/gi)) {
-    counts[norm(m[2])] += Number(m[1]);
+  // "6 Informational" (container auditor) or "Informational: 6" (host auditor).
+  for (const m of (tally[1] || tally[2] || "").matchAll(/(\d+)\s*(Critical|High|Medium|Low|Informational|Info)\b|\b(Critical|High|Medium|Low|Informational|Info):?\s*(\d+)/gi)) {
+    counts[norm(m[2] || m[3])] += Number(m[1] || m[4]);
   }
 }
 
