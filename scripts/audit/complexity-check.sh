@@ -211,6 +211,20 @@ KNOWN_LIB_DECLS = {
     "fixedpoint128", "sqrtpricemath", "bitmath", "unsafemath",
     "lowgassafemath", "transferhelper", "pooladdress", "callbackvalidation",
     "oraclelibrary", "positionkey", "path",
+    # Uniswap v4 core/periphery + Permit2. Job 1019 (a v4 hook launcher, ~1k
+    # LoC of its own) flattened all of these into every file and was declined
+    # at 4,225 LoC. "Pool"/"Position" are left out: too generic to drop.
+    "hooks", "statelibrary", "transientstatelibrary", "currencylibrary",
+    "balancedeltalibrary", "beforeswapdeltalibrary", "poolidlibrary",
+    "lpfeelibrary", "protocolfeelibrary", "customrevert", "liquiditymath",
+    "swapmath", "tickbitmap", "parsebytes", "currencydelta",
+    "currencyreserves", "nonzerodeltacount", "lock", "ipoolmanager", "ihooks",
+    "iprotocolfees", "iextsload", "iexttload", "iunlockcallback",
+    "iimmutablestate", "immutablestate", "safecallback", "deltaresolver",
+    "basehook", "positioninfolibrary", "calldatadecoder", "ipositionmanager",
+    "ipoolinitializer", "inotifier", "isubscriber", "imulticall",
+    "iunorderednonce", "ipermit2forwarder", "iallowancetransfer",
+    "isignaturetransfer", "ipermit2", "ieip712", "iweth9",
     # solady / solmate
     "fixedpointmathlib", "safetransferlib", "libstring", "libbit",
     "merkleprooflib", "signaturecheckerlib", "libclone", "weth",
@@ -218,8 +232,11 @@ KNOWN_LIB_DECLS = {
 # every IERCxxx / IERCxxxYyy standard interface
 STD_IFACE_RE = re.compile(r"^ierc\d+", re.IGNORECASE)
 
+# Flatteners rename colliding decls: SafeCast_0, SafeCast_1, IEIP712_v4.
+FLAT_SUFFIX_RE = re.compile(r"_(?:\d+|v\d+)$", re.IGNORECASE)
+
 def is_known_lib(name):
-    n = name.lower()
+    n = FLAT_SUFFIX_RE.sub("", name.lower())
     return n in KNOWN_LIB_DECLS or bool(STD_IFACE_RE.match(n))
 
 m = SCOPE_RE.search(desc)
