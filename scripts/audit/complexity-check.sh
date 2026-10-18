@@ -172,7 +172,7 @@ SECTION_RE = re.compile(
     r"^\s*(?:abstract\s+contract|contract|library|interface)\s+[A-Za-z_]",
 )
 DECL_NAME_RE = re.compile(
-    r"^\s*(?:abstract\s+contract|contract|library|interface)\s+([A-Za-z_][A-Za-z0-9_]*)",
+    r"^\s*(abstract\s+contract|contract|library|interface)\s+([A-Za-z_][A-Za-z0-9_]*)",
 )
 # The header-comment test above only fires when the flattener preserved a
 # per-section attribution comment. Many don't: in job 633's flat file OZ's
@@ -213,7 +213,8 @@ KNOWN_LIB_DECLS = {
     "oraclelibrary", "positionkey", "path",
     # Uniswap v4 core/periphery + Permit2. Job 1019 (a v4 hook launcher, ~1k
     # LoC of its own) flattened all of these into every file and was declined
-    # at 4,225 LoC. "Pool"/"Position" are left out: too generic to drop.
+    # at 4,225 LoC. "Pool"/"Position"/"BaseHook" are left out: too generic
+    # to drop. "Lock"/"Hooks" only drop as a `library` (LIBRARY_ONLY_DECLS).
     "hooks", "statelibrary", "transientstatelibrary", "currencylibrary",
     "balancedeltalibrary", "beforeswapdeltalibrary", "poolidlibrary",
     "lpfeelibrary", "protocolfeelibrary", "customrevert", "liquiditymath",
@@ -221,7 +222,7 @@ KNOWN_LIB_DECLS = {
     "currencyreserves", "nonzerodeltacount", "lock", "ipoolmanager", "ihooks",
     "iprotocolfees", "iextsload", "iexttload", "iunlockcallback",
     "iimmutablestate", "immutablestate", "safecallback", "deltaresolver",
-    "basehook", "positioninfolibrary", "calldatadecoder", "ipositionmanager",
+    "positioninfolibrary", "calldatadecoder", "ipositionmanager",
     "ipoolinitializer", "inotifier", "isubscriber", "imulticall",
     "iunorderednonce", "ipermit2forwarder", "iallowancetransfer",
     "isignaturetransfer", "ipermit2", "ieip712", "iweth9",
@@ -235,8 +236,15 @@ STD_IFACE_RE = re.compile(r"^ierc\d+", re.IGNORECASE)
 # Flatteners rename colliding decls: SafeCast_0, SafeCast_1, IEIP712_v4.
 FLAT_SUFFIX_RE = re.compile(r"_(?:\d+|v\d+)$", re.IGNORECASE)
 
-def is_known_lib(name):
+# Names a client plausibly uses for its own contract (Hardhat's sample is
+# `contract Lock`). Upstream v4 declares these as `library`, so only that
+# kind drops; a client `contract Lock` before the last section is counted.
+LIBRARY_ONLY_DECLS = {"lock", "hooks"}
+
+def is_known_lib(name, kind=""):
     n = FLAT_SUFFIX_RE.sub("", name.lower())
+    if n in LIBRARY_ONLY_DECLS:
+        return kind == "library"
     return n in KNOWN_LIB_DECLS or bool(STD_IFACE_RE.match(n))
 
 m = SCOPE_RE.search(desc)
@@ -384,7 +392,7 @@ def count_sol(text):
             continue
         dm = DECL_NAME_RE.match(chunk[0])
         is_last = (i == len(bounds) - 2)
-        if i > 0 and not is_last and dm and is_known_lib(dm.group(1)):
+        if i > 0 and not is_last and dm and is_known_lib(dm.group(2), dm.group(1)):
             continue
         key = hashlib.sha256(body.strip().encode()).hexdigest()
         if key in seen_sections:

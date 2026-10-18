@@ -183,6 +183,7 @@ EXPECT_NAMED_LIKE_LIB = 8  # preamble 2 + contract Math 6; OZ SafeCast dropped
 EXPECT_DEDUPED = 10        # IShared 3 counted ONCE + Alpha 3 + Beta 3 + preamble 1
 EXPECT_HEADER = 6          # preamble 2 + RealTarget 4; header-attributed dropped
 EXPECT_V4 = 10             # preamble 2 + ILauncher 3 + Launcher 5; v4/Permit2 dropped
+EXPECT_CLIENT_LOCK = 11    # preamble 2 + client contract Lock 6 + Launcher 3; library Hooks dropped
 
 
 def test_counting():
@@ -217,6 +218,12 @@ def test_counting():
         # IEIP712_v4, billed as the client's code (4,225 LoC for ~1k real).
         v, t, loc = run_gate(f"Audit only {base}/flat_uniswap_v4.sol")
         check("v4 + suffixed libs dropped, project counted", loc, EXPECT_V4)
+
+        # A client's own `contract Lock` (Hardhat's sample name) before the
+        # last section must count; only v4's `library Lock`/`Hooks` drop.
+        v, t, loc = run_gate(f"Audit only {base}/client_lock.sol")
+        check("client contract Lock counted, library Hooks dropped", loc,
+              EXPECT_CLIENT_LOCK)
 
         # The verdict boundary itself: same file, budget below its size.
         v, t, loc = run_gate(f"Audit only {base}/flat_with_oz.sol",
