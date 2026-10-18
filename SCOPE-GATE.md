@@ -152,7 +152,7 @@ the name match. After the fix it measures **1,278** → ok.
 The refund was already out, so the audit ran by hand on clawd-sat with
 `host-auditor/audit.sh 1019 --go --only <phase>` for safety → audit → report →
 publish (no accept, no complete: the job is closed). Result: 0C/0H/1M/2L/6I,
-62/62 citations resolve. Sent to the client directly:
+62/62 citations resolve. Links for the client:
 
 - report: https://bafkreiffm3l7i7k5scaznzhvz4goji2lkfwzsjiv5qvodcuabwzfozw3xq.ipfs.community.bgipfs.com/
 - pretty: https://bafkreig44cg5wg6ias33cbpqp3xo2qajskkt5o4iuc373u5teylog6hpye.ipfs.community.bgipfs.com/
