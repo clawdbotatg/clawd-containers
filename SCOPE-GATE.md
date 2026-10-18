@@ -138,6 +138,28 @@ a competitor, check the wallet against §6.
 | `eca84b9` | `self_update` in the wrangler — push to main deploys fleet-wide. |
 | `66b97d7` | CLAUDE.md deploy section. |
 | *(this one)* | `self_update` ignores **untracked** files; only tracked modifications count as "live editing". |
+| `85d94fb` | Job 1019 (2026-10-17). Uniswap v4 + Permit2 names added to `KNOWN_LIB_DECLS`, and `is_known_lib` strips flattener renames (`SafeCast_0`, `IEIP712_v4`). Fixture `flat_uniswap_v4.sol`. |
+| `4f22b50` | Not the gate: the pretty-report renderer now reads the host-auditor tally format (`Informational: 6`), which it showed as 0. |
+
+### Job 1019 (2026-10-17) — wrong decline, fixed
+
+A client ([tweet](https://x.com/mrtdlgc/status/2111610450357956815)) sent 4
+flattened files of a Uniswap v4 hook launcher. clawd-sat declined and refunded
+it at **4,225 LoC**. His own code is about **1,000**. The rest was v4 libraries
+the name list didn't know, plus `SafeCast_0` (1,000+ lines of OZ) slipping past
+the name match. After the fix it measures **1,278** → ok.
+
+The refund was already out, so the audit ran by hand on clawd-sat with
+`host-auditor/audit.sh 1019 --go --only <phase>` for safety → audit → report →
+publish (no accept, no complete: the job is closed). Result: 0C/0H/1M/2L/6I,
+62/62 citations resolve. Sent to the client directly:
+
+- report: https://bafkreiffm3l7i7k5scaznzhvz4goji2lkfwzsjiv5qvodcuabwzfozw3xq.ipfs.community.bgipfs.com/
+- pretty: https://bafkreig44cg5wg6ias33cbpqp3xo2qajskkt5o4iuc373u5teylog6hpye.ipfs.community.bgipfs.com/
+
+The pretty page is on IPFS, not `leftclaw.services/result/1019.html`. Also:
+the first push failed because clawd-sat's `clawdbotatg` gh login was dead.
+It was re-done with `gh auth login` on 2026-10-18.
 
 On the pinned-ref work: a branch name can contain slashes (job 621's ref is
 `audit2/round9-batched-20260814`) and nothing in the URL says where the ref
