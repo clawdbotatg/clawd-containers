@@ -1168,18 +1168,36 @@ self_update() {
   # would genuinely be clobbered is still safe, because `pull --ff-only`
   # refuses that case itself ("untracked working tree files would be
   # overwritten") and changes nothing — we just log it and try again next tick.
-  if [[ -n "$(git status --porcelain --untracked-files=no 2>/dev/null)" ]]; then
+  # Files ./refresh-skills.sh rewrites from upstream. Drift there is the
+  # upstream moving, not a live edit: 2026-10-23..26 ethskills.com changed
+  # its audit SKILL.md, every box's daily refresh dirtied the tracked copy,
+  # and self-update sat out the whole fleet (859 skips on clawd-leftclaw
+  # while the queue was down for a different reason). They never block the
+  # pull; they are reset to HEAD only if the pull itself trips over them,
+  # and the next daily refresh re-fetches.
+  local -a refreshed=(skills/ethskills-audit.md skills/pashov-auditor.md skills/pashov-auditor-v4.md)
+  local -a excl=() f
+  for f in "${refreshed[@]}"; do excl+=(":(exclude)$f"); done
+  if [[ -n "$(git status --porcelain --untracked-files=no -- . "${excl[@]}" 2>/dev/null)" ]]; then
     log "self-update: tracked files modified — skipping (someone is live-editing)"; return 0
   fi
 
   local before after
   before="$(git rev-parse HEAD 2>/dev/null)" || return 0
   # Never let git block on a credential dialog on an unattended box.
-  if ! GIT_TERMINAL_PROMPT=0 GIT_ASKPASS=/bin/echo \
-       git -c credential.helper='!gh auth git-credential' \
-           pull --ff-only -q origin main >>"$LOG" 2>&1; then
-    log "self-update: ff-only pull failed (diverged or offline) — staying on ${before:0:8}"
-    return 0
+  _su_pull() {
+    GIT_TERMINAL_PROMPT=0 GIT_ASKPASS=/bin/echo \
+      git -c credential.helper='!gh auth git-credential' \
+          pull --ff-only -q origin main >>"$LOG" 2>&1
+  }
+  if ! _su_pull; then
+    # An incoming commit touches a refresh-owned file the refresh dirtied:
+    # take HEAD's copy (it is upstream's content anyway) and retry once.
+    git checkout -q -- "${refreshed[@]}" 2>/dev/null || true
+    if ! _su_pull; then
+      log "self-update: ff-only pull failed (diverged or offline) — staying on ${before:0:8}"
+      return 0
+    fi
   fi
   after="$(git rev-parse HEAD 2>/dev/null)"
   [[ "$before" == "$after" ]] && return 0

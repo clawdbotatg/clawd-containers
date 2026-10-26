@@ -306,8 +306,10 @@ something.
 
 ## 8. What is still open
 
-- **`0x024771c8…6be4` is unidentified.** It declined job 621. Either a
-  fourth box nobody has mapped, or a genuine competitor.
+- ~~`0x024771c8…6be4` is unidentified.~~ **Resolved 2026-10-26:** it is a
+  fleet box — it completed 1046 and 1049–1054 with our stage vocabulary
+  (`audit-pass-2-pashov`, bgipfs report pins). Not clawd-leftclaw (whose
+  wallets are `0xB2109c9C…` and `0x8F5d03C5…`); clawd-head or clawd-sat.
 - **No client was ever told.** Five refunds went out with a message saying
   "too complex, please resubmit smaller" that was factually wrong. Nothing
   has been sent to correct it. The jobs are closed, so there is no thread to

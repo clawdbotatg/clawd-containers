@@ -263,7 +263,9 @@ has been corrected. Reading them as rivals makes a job burst look like "we won
 2 of 7" when the fleet won **all 7** — which is the actual explanation for
 burning three subscriptions, and it is invisible if you mislabel them.
 
-Only `0xb2109c9c…` and `0x024771c8…` remain unconfirmed as third parties.
+`0xb2109c9c…` is clawd-leftclaw's `.env.auditor` wallet, and `0x024771c8…`
+completed 1046/1049–1054 with our stage vocabulary (2026-10-26): all four
+takers are fleet wallets. No third party has been seen on this queue.
 **Check any taker against every box's `.env.auditor*` before calling it a rival.**
 
 ---
