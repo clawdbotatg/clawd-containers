@@ -69,7 +69,12 @@ git -C pashov-skills-v4 sparse-checkout set "${PASHOV_V4_SKILLS[@]}"
 # ethskills.com is our own content (austintgriffith/evm-audit-skills) — kept
 # live; the pashov pointer is pinned to the same reviewed SHA as the clone.
 echo "==> refreshing top-level SKILL.md pointers"
-curl -fsSL https://ethskills.com/audit/SKILL.md -o ethskills-audit.md
+# ethskills-audit.md is PINNED to the committed copy (2026-10-26). The live
+# URL is unversioned: on ~10-23 ethskills.com rewrote it from "parallel
+# sub-agents, 19 domains" to "one concise report, load 1-2 checklists", and
+# the auditor (v3 Phase 1 runs this skill) shipped two "single-pass review"
+# reports (jobs 1056/1057). Re-pin deliberately: fetch, diff, commit.
+#   curl -fsSL https://ethskills.com/audit/SKILL.md -o ethskills-audit.md
 curl -fsSL "https://raw.githubusercontent.com/pashov/skills/$PASHOV_SHA/solidity-auditor/SKILL.md" -o pashov-auditor.md
 curl -fsSL "https://raw.githubusercontent.com/pashov/skills/$PASHOV_V4_SHA/solidity-auditor/SKILL.md" -o pashov-auditor-v4.md
 
