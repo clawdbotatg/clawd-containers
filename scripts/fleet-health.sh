@@ -85,6 +85,19 @@ for env in "$HERE"/.env.auditor "$HERE"/.env.auditor2 "$HERE"/.env.frontend-qa "
   else ok "$tag $addr — ${eth} ETH"; fi
 done
 
+if "$HERE/cont" token mode >/dev/null 2>&1; then
+# Token mode: VMs ride 1-year setup-tokens, so the OAuth login dirs below are
+# unused -- probing them only produced LOGGED OUT noise. Check the tokens.
+hdr "token usage (token mode -- login dirs unused)"
+min="${CONT_MIN_HEADROOM:-15}"
+while read -r line; do
+  [[ -n "$line" ]] || continue
+  st=$(awk '{print $2}' <<<"$line"); hr=$(awk '{print $4}' <<<"$line" | tr -d '%')
+  if [[ "$st" != ok ]]; then flag "$line"
+  elif [[ "$hr" =~ ^[0-9]+$ ]] && (( hr < min )); then flag "$line — under ${min}% floor"
+  else ok "$line"; fi
+done < <("$HERE/cont" token list 2>&1)
+else
 hdr "account usage (grouped by SUBSCRIPTION, not by directory)"
 # A config dir is not a subscription. One login can hold seats in several
 # orgs, and the same org can be signed in under several dirs -- and the ORG
@@ -129,6 +142,7 @@ IDPY
     else ok "$msg"; fi
   done
 else flag "usage probe not found at $probe"; fi
+fi
 
 hdr "handoff stampede (the big subscription burner)"
 log="$HOME/Library/Logs/clawd-harness.log"
