@@ -1,0 +1,9 @@
+# Worker wallets per fleet box (public addresses only — never keys).
+# Used by active-jobs.sh to say which box holds a job.
+# <address> <box> <env file>
+0xEE8f4Bf792FD8Fdfc5aD08aF61f29Fd05789377c clawd-head .env.auditor
+0xDB5465EA8707D99C5ac73cDeA404b99D4F570f6C clawd-head .env.auditor2
+0xd98728B9F6c09Af4A9E887d8134e577c8df0636a clawd-sat .env.auditor
+0x024771c8C5074c2B8330703dd9BeBf9B57486be4 clawd-sat .env.auditor2
+0xB2109c9C0BbA5F7e99b30B304968bD22925621AD clawd-leftclaw .env.auditor
+0x8F5d03C5A6C1d982A32Df298ee960f7b75Df5359 clawd-leftclaw .env.auditor2

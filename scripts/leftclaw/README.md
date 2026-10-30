@@ -10,6 +10,7 @@ internally so the agent never sees `PRIVATE_KEY` or your auth signature.
 |---|---|---|---|
 | `_auth.sh` | (sourced) | `PRIVATE_KEY` | Helper. Signs `"LeftClaw Services Auth"` once, caches `LEFTCLAW_ADDR`/`LEFTCLAW_SIG` at `~/.cache/leftclaw-auth` |
 | `my-jobs.sh` | `[service_type]` | `PRIVATE_KEY` | Lists jobs assigned to your wallet with status OPEN(0) or IN_PROGRESS(1). **Use this first** — finish in-progress work before accepting new |
+| `active-jobs.sh` | `[--json]` | none | Every OPEN/IN_PROGRESS job on the contract for the **whole fleet**, with the box that holds each worker wallet (`fleet-wallets.txt`). This is what job-count screens show — run it when asked about an "open job" |
 | `list-jobs.sh` | `[service_type]` (default 4) | none | Lists OPEN jobs of the given service type, on-chain. JSON array |
 | `get-job.sh` | `<job_id>` | none | Read full Job from contract. Returns `{id, client, worker, serviceTypeId, status, description}` (description is the audit target) |
 | `sanitize-check.sh` | `<job_id>` | none | GET `/api/job/sanitize?jobId={id}`; on `pending` it POSTs `{jobId}` to trigger the server-side check (jobs posted straight to the contract are never checked otherwise) and uses that verdict. Exit 0 iff `safe=true` |

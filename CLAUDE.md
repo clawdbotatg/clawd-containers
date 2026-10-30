@@ -222,6 +222,15 @@ On macOS 26.x + tart 2.32.x, plain `tart run <name>` boots the VM but **never re
 - `install.sh` — installs `brew`/`tart`/`sshpass`, symlinks `cont` to `/usr/local/bin`
 - `provision.sh` — sample idempotent in-VM script (Homebrew, Chrome, iTerm, dock tweaks); the default target of `cont provision`
 
+## "The screen says a job is open" — whose is it?
+
+Run `./scripts/leftclaw/active-jobs.sh` on any box. It lists every OPEN and
+IN_PROGRESS job on the contract and which box holds it (wallet map in
+`scripts/leftclaw/fleet-wallets.txt` — update it when a box gets a new
+wallet). `my-jobs.sh` only sees THIS box's wallets, so "none of mine" does
+not mean "none open". Once accepted, a job can't be declined or cancelled
+by the client; only the contract owner can release it (`adminResetJob`).
+
 ## Checking what the fleet shipped
 
 `completeJob` is the end of the line — nothing downstream inspects the

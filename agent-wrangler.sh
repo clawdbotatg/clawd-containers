@@ -1364,8 +1364,8 @@ while :; do
             if host_decline "$jid" "$env" "exceeded ${cap}s time cap ${strikes}x"; then
               kv_set "$jid" 0 "$CAP_STRIKES_FILE"
             else
-              host_post_message "$jid" "$env" "Worker note: this job has twice exceeded the worker's ${cap}s compute budget without completing, and an accepted job cannot be declined on-chain. Please cancel the job to release it back to the pool, or expect it to remain stalled." || true
-              notify "⛔ job ${jid} (${vm}) hit the ${cap}s time cap ${strikes}x — PARKED. Can't decline an accepted job; ask the client to cancel, or raise the cap and clear job ${jid} from ${CAP_STRIKES_FILE}."
+              host_post_message "$jid" "$env" "Worker note: this job has twice exceeded the worker's ${cap}s compute budget without completing, and an accepted job cannot be declined on-chain. It is paused while we look at it; reply here if anything about the job has changed." || true
+              notify "⛔ job ${jid} (${vm}) hit the ${cap}s time cap ${strikes}x — PARKED. Clients can't cancel an accepted job — only the contract owner (adminResetJob) can release it; or finish it via host-auditor and clear job ${jid} from ${CAP_STRIKES_FILE}."
             fi
           fi
         fi
@@ -1442,12 +1442,13 @@ while :; do
         # entirely — booting even for OTHER open jobs is pointless,
         # because the in-VM protocol is "finish IN_PROGRESS first", so
         # any boot resumes the parked job and burns another full cap.
-        # Unblocks when the client cancels (job leaves my-jobs) or the
-        # job's line is removed from CAP_STRIKES_FILE.
+        # Unblocks when the owner runs adminResetJob (job leaves my-jobs;
+        # clients can't cancel an accepted job) or the job's line is
+        # removed from CAP_STRIKES_FILE.
         if [[ "$mine" =~ ^[1-9] ]]; then
           jid=$(get_assigned_job_id "$svc" "$env")
           if [[ -n "$jid" ]] && (( $(kv_get "$jid" "$CAP_STRIKES_FILE") >= MAX_CAP_STRIKES )); then
-            log "$vm: assigned job $jid is PARKED (${MAX_CAP_STRIKES} time-cap strikes) — not booting; client cancel or clear it from $CAP_STRIKES_FILE"
+            log "$vm: assigned job $jid is PARKED (${MAX_CAP_STRIKES} time-cap strikes) — not booting; needs owner adminResetJob, or clear it from $CAP_STRIKES_FILE"
             continue
           fi
         fi
