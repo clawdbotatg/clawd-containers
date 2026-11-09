@@ -1405,7 +1405,10 @@ while :; do
         jid=$(get_assigned_job_id "$svc" "$env")
         stalled=0
         if [[ -n "$jid" ]]; then
-          sig=$(get_job_progress_sig "$jid" "$env")
+          # Key the sig by job id: a job with no notes yet has an empty sig,
+          # and so did the previous job's last tick — without the id the new
+          # job inherited the old stamp and was "stalled" minutes after boot.
+          sig="$jid:$(get_job_progress_sig "$jid" "$env")"
           sigf="$STATE_DIR/$vm.progress-sig"
           stampf="$STATE_DIR/$vm.progress-at"
           prev=$(cat "$sigf" 2>/dev/null || echo "__unset__")
@@ -1413,7 +1416,7 @@ while :; do
             printf '%s' "$sig" > "$sigf"; date +%s > "$stampf"
           else
             budget="$STALL_SECONDS"
-            [[ -z "$sig" ]] && budget="$STALL_FIRST_STAGE_SECONDS"
+            [[ "$sig" == "$jid:" ]] && budget="$STALL_FIRST_STAGE_SECONDS"
             since=$(cat "$stampf" 2>/dev/null || echo 0)
             (( since == 0 )) && { date +%s > "$stampf"; since=$(date +%s); }
             quiet=$(( $(date +%s) - since ))
