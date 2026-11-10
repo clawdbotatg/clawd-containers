@@ -76,10 +76,11 @@ In one message:
 4. **Scope sizing → default model for the HUNTING phases.** Same rule as v2:
    `{scope}` = **small** if total in-scope `.sol` LOC < ~600 (regardless of file
    count), else **large**. Default `{agent_model}` for phases 1 & 2:
-   small → `sonnet`, large → `opus`. Agent *count* never scales.
+   `fable` (Fable 5.2) for BOTH scopes (2026-11-09; was small → `sonnet`, large →
+   `opus`). Agent *count* never scales.
 5. **Model selection — once, here.** Same rules as v2 (interactive → pashov Turn 1b
    picker; autonomous/headless → `{scope}` default silently; no-`model`-param runtimes
-   → leave unset). **Phase 0 is exempt:** always `opus`. **Phase 0a is exempt the
+   → leave unset). **Phase 0 is exempt:** always `fable`. **Phase 0a is exempt the
    other way:** it is mechanical extraction — run it in YOUR context and let its own
    `sonnet` sub-agent rules stand; never upgrade them to opus.
 

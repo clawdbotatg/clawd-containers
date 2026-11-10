@@ -76,7 +76,7 @@ State the tiering explicitly in the map so a reader knows what got deep attentio
    running standalone, `mktemp -d ./.audit-context-XXXXXX`.
 3. **Model.** Context quality determines everything downstream — a wrong invariant
    poisons 18 hunting agents. Run the context agents on the **strongest available
-   model** regardless of scope size (currently `opus`). This is the one phase that
+   model** regardless of scope size (currently `fable` = Fable 5.2). This is the one phase that
    does not scale its model down for small targets. In runtimes with no `model`
    parameter, omit it.
 4. Bash `find`/`grep` a cheap skeleton first — contract names, function signatures,

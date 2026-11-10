@@ -26,6 +26,21 @@ source "$SELF_DIR/provisionAgent.sh"
 
 echo "==> auditor layer: $(whoami)@$(hostname)"
 
+# --- Claude Code floor — every boot, FAST or not ---------------------------
+# The auditor runs `--model claude-fable-5-2` and spawns `model: fable`
+# agents. A CLI older than CLAUDE_MIN_VERSION rejects that id and maps
+# `fable` to the old Fable 5 (tested on gold's 2.1.202, 2026-11-09), and a
+# fresh clone only starts its background auto-update AFTER the auditor has
+# launched. So a gold baked before the floor gets the pinned CLI here.
+CLAUDE_MIN_VERSION="2.1.321"
+_cv="$("$HOME/.local/bin/claude" --version 2>/dev/null | awk '{print $1}')"
+if [[ "$(printf '%s\n%s\n' "$CLAUDE_MIN_VERSION" "${_cv:-0}" | sort -V | head -1)" != "$CLAUDE_MIN_VERSION" ]]; then
+  echo "==> claude ${_cv:-missing} < $CLAUDE_MIN_VERSION — installing $CLAUDE_MIN_VERSION"
+  "$HOME/.local/bin/claude" install "$CLAUDE_MIN_VERSION" >/dev/null 2>&1 \
+    || curl -fsSL https://claude.ai/install.sh | bash -s "$CLAUDE_MIN_VERSION"
+  echo "==> claude now $("$HOME/.local/bin/claude" --version 2>/dev/null)"
+fi
+
 # --- foundry (provides `cast`) — Tier 2, baked into auditor-gold --------
 # leftclaw scripts use `cast` for on-chain reads (getJob) and writes
 # (acceptJob, completeJob). Install via the official one-liner if missing.
@@ -141,7 +156,7 @@ if [[ ! -f "$PROMPT_FILE" ]]; then
 fi
 PROMPT="$(cat "$PROMPT_FILE")"
 
-exec "$HOME/.local/bin/claude" --dangerously-skip-permissions "$PROMPT"
+exec "$HOME/.local/bin/claude" --dangerously-skip-permissions --model claude-fable-5-2 "$PROMPT"
 EOSH
 chmod 755 "$HOME/.local/bin/claude-startup.sh"
 
