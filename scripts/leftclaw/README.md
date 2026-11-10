@@ -20,6 +20,8 @@ internally so the agent never sees `PRIVATE_KEY` or your auth signature.
 | `decline.sh` | `<job_id>` | `PRIVATE_KEY` | `declineJob(uint256)` |
 | `log-work.sh` | `<job_id> <stage> <note>` | `PRIVATE_KEY` | `logWork(uint256,string,string)` (note, stage swapped on the wire to match contract sig) |
 | `complete.sh` | `<job_id> <result_url>` | `PRIVATE_KEY` | `completeJob(uint256,string)` — result_url MUST be a full `https://{CID}.ipfs.community.bgipfs.com/...` URL |
+| `pipeline_gate.py` | `<job_id> [--count]` | — | Called by `complete.sh` in auditor VMs: refuses delivery (exit 3) of a Solidity audit whose session log shows fewer than 20 sub-agents. See CLAUDE.md "The delivery gate". |
+| `delivery_summary.py` | `<job_id>` | `ALCHEMY_API_KEY` | One line for the wrangler's completion alert: accept→complete minutes + note count, `FAST …` when under 20 min. |
 | `review-queue.sh` | `[from_id]`, `--mark <id>` | `ALCHEMY_API_KEY` | COMPLETED jobs past a watermark, one JSON line each — intake for the review pass |
 | `mech-check.sh` | `<job_id>...`, `--queue`, `--json` | `ALCHEMY_API_KEY` | Layer 1 of [REVIEW.md](../../REVIEW.md): mechanical checks over a delivered job. Exit 1 if any check FAILs |
 

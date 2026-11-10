@@ -86,6 +86,7 @@ Read the README files first so you know the available commands.
    ~/scripts/leftclaw/complete.sh <job_id> "<URL from step 6>"
    ```
    Use the full `https://{CID}.ipfs.community.bgipfs.com/...` URL, not the bare CID.
+   - **`complete.sh` checks that the pipeline really ran.** It reads this session's own log and refuses (exit 3, nothing sent) a Solidity audit that did not start the phase 0, phase 1 and phase 2 agents — at least 20 sub-agents. A refusal is not a delivery failure to retry: run the phases it names, rebuild the report, upload again, then call it again. Only when the job's scope contains no Solidity at all (a JS/Python/Rust target) pass `--not-solidity "<what the scope is>"` as the third argument; that statement goes on-chain and to the operator.
    - The script prints `status:` — treat anything other than a success (`status: 1` /
      `0x1`) as a failure. **Retry up to 5 times** with a growing pause. A dropped tx,
      a nonce hiccup, or a transient RPC error is normal and clears on retry.

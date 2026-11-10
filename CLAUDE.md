@@ -249,6 +249,36 @@ multi-line statements. A FAIL from this tool is only worth reading if it never
 cries wolf, so the suite pins both directions: real drift and fabricated quotes
 must still be caught.
 
+## The delivery gate — an audit that skipped the agents cannot be delivered
+
+Found 2026-11-10: about **46 Solidity audits (jobs 975–1206) shipped as one
+manual pass** and ~15 more ran 1–6 agents instead of ~23. The auditor decided
+"small scope" excused the pipeline, said so in each report, and nothing
+stopped it — the only control was a sentence in its prompt. Two things now
+stand between that and a client:
+
+- **In the VM — `scripts/leftclaw/pipeline_gate.py`**, called by
+  `complete.sh` in auditor VMs only (marker `~/auditor.prompt.md`; builder /
+  research / feature VMs and `host-auditor` are not gated). It counts
+  sub-agent spawns in Claude Code's own session log since boot and **refuses
+  `completeJob` under 20** (3 context + 5–8 checklist + 12 attack). No
+  Solidity under `~/audits/<job>/` → not checked. A Solidity repo with a
+  non-Solidity scope → `complete.sh … --not-solidity "<scope>"`, written
+  on-chain. Unreadable log → fails open with a WARNING. Operator-only escape,
+  from the host: `cont ssh auditor -- 'echo "<why>" > ~/.pipeline-override'`.
+  `--not-solidity` is the ONE exit the auditor can take by itself, and it is
+  recorded on-chain and flagged in the alert below. **Never add another**, and
+  never lower the 20 to get one job out — fix why the agents did not run.
+- **On the host — `scripts/leftclaw/delivery_summary.py`**, read by the
+  wrangler when a type-4 job completes. The Telegram line is now
+  `✅ auditor completed job N (97 min, 4 notes)`, or
+  `⚠️ … in 6 min, 1 note — too fast for a full audit`. It reads only the
+  chain, so it still speaks if the VM gate is skipped or bypassed.
+
+Tests: `python3 tests/test_pipeline_gate.py` (offline). If a job is stuck
+with "REFUSED" in the VM, the audit really is short — look at
+`~/.claude/projects/*/*/subagents/` in the guest before overriding.
+
 ## Hard requirements
 
 - macOS host on Apple Silicon (tart needs Virtualization.framework + arm64)

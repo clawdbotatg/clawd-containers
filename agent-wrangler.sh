@@ -948,7 +948,23 @@ try: print(json.load(sys.stdin).get("status",""))
 except Exception: pass' 2>/dev/null )
     if [[ "$st" == "2" ]]; then
       log "$vm: job $prev completed"
-      notify "✅ ${vm} completed job ${prev}"
+      # Audits: say how long it took and how many progress notes it left —
+      # read from the chain, not from the VM. A full audit runs 25-100 min;
+      # one that lands in a few minutes was a single manual pass (46 of them
+      # shipped unnoticed, jobs 975-1206), so that case is a ⚠️, not a ✅.
+      local sum=""
+      if [[ "$svc" == "4" && -f ./scripts/leftclaw/delivery_summary.py ]]; then
+        sum=$( ( set -a; source "$env" 2>/dev/null; set +a
+                 python3 ./scripts/leftclaw/delivery_summary.py "$prev" 2>/dev/null
+               ) | head -1 )
+      fi
+      case "$sum" in
+        FAST\ *) log "  job $prev: ${sum#FAST }"
+                 notify "⚠️ ${vm} completed job ${prev} in ${sum#FAST }" ;;
+        ?*)      log "  job $prev: $sum"
+                 notify "✅ ${vm} completed job ${prev} (${sum})" ;;
+        *)       notify "✅ ${vm} completed job ${prev}" ;;
+      esac
     fi
   fi
   if [[ -n "$cur" ]]; then echo "$cur" > "$f"; else rm -f "$f"; fi
