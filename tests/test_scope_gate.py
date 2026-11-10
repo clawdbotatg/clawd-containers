@@ -225,6 +225,8 @@ PASTED_1210 = (
     "```\n"
     "CLAIMS TO ATTACK\nC1 scale and decimals.\n"
 )
+EXPECT_OZ_BANNER = 6       # preamble 3 (incl. the banner line) + FeeHook 3; vendored BaseHook section dropped
+EXPECT_PROSE = 12          # every non-blank line of the fixture: nothing is dropped
 EXPECT_PASTED = 11         # preamble 2 + IUnUSDLike 3 + SunUSDOracle 6
 
 
@@ -278,6 +280,23 @@ def test_counting():
         v, t, loc = run_gate(f"Audit only {base}/client_lock.sol")
         check("client contract Lock counted, library Hooks dropped", loc,
               EXPECT_CLIENT_LOCK)
+
+        # Jobs 1203/1204: a client's OWN contract whose doc comment mentions
+        # OpenZeppelin / solady in prose is not a vendored library. Dropping it
+        # under-counts (a 4,000-line contract measured 4 lines) — the direction
+        # that accepts a job we cannot finish. Both sections must count: the
+        # non-last one (prose is not attribution) and the last one.
+        v, t, loc = run_gate(f"Audit only {base}/prose_mention.sol")
+        check("prose mention of a library does not drop the client's contract",
+              loc, EXPECT_PROSE)
+
+        # Job 1187: the other direction. OZ ships more than "Contracts" — a
+        # vendored "OpenZeppelin Uniswap Hooks (last updated …)" section is
+        # still a library and must still drop, while the client's hook below
+        # it (which names OpenZeppelin in its title) counts.
+        v, t, loc = run_gate(f"Audit only {base}/oz_hooks_banner.sol")
+        check("OZ product banner still drops; client hook below it counts",
+              loc, EXPECT_OZ_BANNER)
 
         # Job 1210: pasted source is measured, its context addresses are not.
         v, t, loc = run_gate(PASTED_1210)

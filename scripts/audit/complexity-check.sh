@@ -167,7 +167,24 @@ IPFS_GATEWAYS = (
     "https://{cid}.ipfs.community.bgipfs.com/",
     "https://ipfs.io/ipfs/{cid}",
 )
-LIB_NAME_RE = re.compile(r"openzeppelin|forge-std|solady|solmate", re.IGNORECASE)
+# What a flattener's per-section ATTRIBUTION looks like, as opposed to a
+# client's own doc comment that merely mentions a library in prose:
+#   // lib/openzeppelin-contracts/contracts/utils/math/Math.sol     (forge)
+#   // File @openzeppelin/contracts/utils/Context.sol               (hardhat)
+#   // OpenZeppelin Contracts (last updated v5.0.0) (utils/Math.sol)
+#   // OpenZeppelin Uniswap Hooks (last updated v1.2.0) (src/base/BaseHook.sol)
+#   /// @author Solady (https://github.com/vectorized/solady/blob/…)
+# i.e. the library name inside a path, or OZ's own file banner. Jobs
+# 1203/1204: the client's contract said "the OpenZeppelin defence against
+# the first-depositor attack" in its NatSpec and the WHOLE contract was
+# dropped as a library — a 4,000-line contract measured 4 lines. That is
+# the under-count direction: an oversized job gets accepted and its escrow
+# locks. Guarded by tests/test_scope_gate.py ("prose mention").
+LIB_ATTRIB_RE = re.compile(
+    r"(?:openzeppelin|forge-std|solady|solmate)[\w.-]*/"
+    r"|openzeppelin\b[^\n]{0,40}\(last updated"       # any OZ product banner
+    r"|openzeppelin\s+contracts\s*(?:v\d|upgradeable)",
+    re.IGNORECASE)
 SECTION_RE = re.compile(
     r"^\s*(?:abstract\s+contract|contract|library|interface)\s+[A-Za-z_]",
 )
@@ -407,10 +424,12 @@ def count_sol(text):
             else:
                 break
         header_zone = "\n".join(lines[k:bounds[i]]) + "\n" + chunk[0]
-        if i > 0 and LIB_NAME_RE.search(header_zone):
-            continue
         dm = DECL_NAME_RE.match(chunk[0])
         is_last = (i == len(bounds) - 2)
+        # Attribution-shaped only (LIB_ATTRIB_RE), and never the last section:
+        # a flattener emits the target last, same guard as the name rule below.
+        if i > 0 and not is_last and LIB_ATTRIB_RE.search(header_zone):
+            continue
         if i > 0 and not is_last and dm and is_known_lib(dm.group(2), dm.group(1)):
             continue
         key = hashlib.sha256(body.strip().encode()).hexdigest()
