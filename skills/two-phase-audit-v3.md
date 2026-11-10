@@ -131,7 +131,7 @@ enhancer, never a blocker.
 ### Turn 0.5 — Phase 0: context building
 
 Execute `skills/audit-context.md` end to end, passing it `{audit_dir}` and the
-resolved scope. Its context agents run on `opus`. **v3 changes:**
+resolved scope. Its context agents run on `fable`. **v3 changes:**
 
 - **Seed the context agents with `{xray_overview}` and `{xray_entrypoints}`** as
   *"mechanical pre-scan output (grep-verified facts, no findings — cross-check your
