@@ -95,6 +95,7 @@ def discover(desc):
         "blob_urls": ns.get("blob_urls", []),
         "direct_urls": ns.get("direct_urls", []),
         "direct_cids": ns.get("direct_cids", []),
+        "inline_only": ns.get("inline_only", False),
     }
 
 
@@ -173,6 +174,59 @@ def test_discovery():
     d = discover("Source pinned at QmYwAPJzv5CZsnA625s3Xf2nemtYgPpHdWEz79ojWnPbdG")
     check("IPFS CID is a direct target", len(d["direct_cids"]), 1)
 
+    # Job 1210: a 75-line oracle pasted in full, surrounded by the addresses
+    # of its deployment and the out-of-scope contracts it reads. Counting
+    # those addresses refunded it at 3,723 LoC.
+    d = discover(PASTED_1210)
+    check("pasted full source: context addresses are not targets", d["addrs"], [])
+    check("pasted full source: inline only", d["inline_only"], True)
+
+    # The other direction: a SNIPPET (no pragma) quoted from a repo must not
+    # hide the repo — that would under-count and accept an oversized job.
+    d = discover("Audit https://github.com/acme/vault . The bug is here:\n"
+                 "```solidity\nfunction withdraw() external { x = 1; }\n```")
+    check("pasted snippet does not hide the repo", len(d["repos"]), 1)
+    check("pasted snippet: not inline only", d["inline_only"], False)
+
+    # A full paste does not hide a repo next to it (only addresses drop).
+    d = discover("Repo: https://github.com/acme/vault\n" + PASTED_1210)
+    check("pasted full source + repo: repo still counted", len(d["repos"]), 1)
+
+    # Pasted source PLUS an explicit scope marker naming addresses: both count.
+    d = discover("Contracts to audit: 0x1111111111111111111111111111111111111111\n"
+                 + PASTED_1210)
+    check("pasted source + explicit scope marker keeps the addresses",
+          len(d["addrs"]) >= 1, True)
+
+
+PASTED_1210 = (
+    "SunUSDOracle - review of an immutable Morpho Blue oracle (Base, DEPLOYED)\n"
+    "Scope: one contract, src/SunUSDOracle.sol. Deployed at "
+    "0xA050F3b8fB5413Ac79B3e6854B44c0Cb4118B821. Constructor argument: sunUSD "
+    "0x4CDa7442A128c38fE5b8CbbA0AC20F8b67d354e4.\n"
+    "CONTEXT (out of scope): unUSD 0x26EaAB4a31fDd7eA86195Ec9bd825b57718EfB1A, "
+    "USDC 0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913, Morpho "
+    "0xBBBBBbbBBb9cC5e90e3b3Af64bdAF62C37EEFFCb.\n"
+    "SOURCE\n"
+    "```solidity\n"
+    "// SPDX-License-Identifier: MIT\n"
+    "pragma solidity ^0.8.24;\n"
+    "\n"
+    "interface IUnUSDLike {\n"
+    "    function totalSupply() external view returns (uint256);\n"
+    "}\n"
+    "\n"
+    "contract SunUSDOracle {\n"
+    "    IUnUSDLike public immutable unUSD;\n"
+    "    function price() external view returns (uint256) {\n"
+    "        return unUSD.totalSupply();\n"
+    "    }\n"
+    "}\n"
+    "```\n"
+    "CLAIMS TO ATTACK\nC1 scale and decimals.\n"
+)
+EXPECT_PASTED = 11         # preamble 2 + IUnUSDLike 3 + SunUSDOracle 6
+
 
 # ── 2. line counting — what the budget is actually spent on ─────────────────
 # Fixtures are tiny so these numbers are hand-checkable. See
@@ -224,6 +278,12 @@ def test_counting():
         v, t, loc = run_gate(f"Audit only {base}/client_lock.sol")
         check("client contract Lock counted, library Hooks dropped", loc,
               EXPECT_CLIENT_LOCK)
+
+        # Job 1210: pasted source is measured, its context addresses are not.
+        v, t, loc = run_gate(PASTED_1210)
+        check("pasted source: verdict", v, "ok")
+        check("pasted source: one target", t, 1)
+        check("pasted source: counted", loc, EXPECT_PASTED)
 
         # The verdict boundary itself: same file, budget below its size.
         v, t, loc = run_gate(f"Audit only {base}/flat_with_oz.sol",

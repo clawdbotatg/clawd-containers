@@ -139,6 +139,7 @@ a competitor, check the wallet against §6.
 | `66b97d7` | CLAUDE.md deploy section. |
 | *(this one)* | `self_update` ignores **untracked** files; only tracked modifications count as "live editing". |
 | `85d94fb` | Job 1019 (2026-10-17). Uniswap v4 + Permit2 names added to `KNOWN_LIB_DECLS`, and `is_known_lib` strips flattener renames (`SafeCast_0`, `IEIP712_v4`). Fixture `flat_uniswap_v4.sol`. |
+| *(job 1210)* | 2026-11-10. Source **pasted in the description** (a 75-line oracle in a ```` ```solidity ```` fence) is the scope; the addresses around it (its deployment + the out-of-scope contracts it reads) were measured instead: 3,723 LoC, refunded. A fenced block with `pragma solidity` + a contract now counts as the target and suppresses addresses unless an explicit scope marker is present; repos/URLs/CIDs beside it still count. Now 67 LoC → ok. Tests: `PASTED_1210` cases. |
 | `4f22b50` | Not the gate: the pretty-report renderer now reads the host-auditor tally format (`Informational: 6`), which it showed as 0. |
 
 ### Job 1019 (2026-10-17) — wrong decline, fixed

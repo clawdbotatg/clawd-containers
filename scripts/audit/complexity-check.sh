@@ -249,8 +249,27 @@ def is_known_lib(name, kind=""):
 
 m = SCOPE_RE.search(desc)
 scope_text = desc[m.end():] if m else desc
+
+# Source pasted INTO the description (job 1210: a 75-line oracle in a
+# ```solidity fence) is the scope itself. The addresses around it are the
+# deployment and the out-of-scope context it calls (sunUSD, unUSD, USDC,
+# Morpho, the IRM...) — counting those billed 3,723 LoC to a 75-line job
+# and refunded it. So: a fenced block holding a full file (`pragma
+# solidity` + a contract/library declaration) wins, and addresses count
+# only when the client ALSO used an explicit scope marker ("contracts to
+# audit: 0x..."). Requiring `pragma` keeps a pasted snippet of a larger
+# codebase from hiding the real (repo/address) scope. Only ADDRESSES are
+# suppressed: a repo / file URL / CID next to the paste still counts (over-
+# counting refunds one job; under-counting accepts one we can't finish).
+FENCE_RE = re.compile(r"```[^\n]*\n(.*?)```", re.DOTALL)
+INLINE_FILE_RE = re.compile(
+    r"pragma\s+solidity[\s\S]*^\s*(?:abstract\s+contract|contract|library)\s+[A-Za-z_]",
+    re.MULTILINE)
+inline_src = "\n\n".join(b for b in FENCE_RE.findall(desc) if INLINE_FILE_RE.search(b))
+inline_only = bool(inline_src) and not m
+
 addrs, seen_a = [], set()
-for a in ADDR_RE.findall(scope_text):
+for a in ([] if inline_only else ADDR_RE.findall(scope_text)):
     if a.lower() not in seen_a:
         seen_a.add(a.lower()); addrs.append(a)
 
@@ -546,13 +565,17 @@ for c in direct_cids:
     if not got:
         unmeasured += 1
 
-total = verified_loc + est_loc + repo_loc + direct_loc
-targets = len(addrs) + len(repos) + len(direct_urls) + len(direct_cids)
+inline_loc = count_sol(inline_src) if inline_src else 0
+
+total = verified_loc + est_loc + repo_loc + direct_loc + inline_loc
+targets = (len(addrs) + len(repos) + len(direct_urls) + len(direct_cids)
+           + (1 if inline_src else 0))
 detail = []
 if verified_loc: detail.append(f"{verified_loc} verified-source LoC ({n_verified} contracts)")
 if est_loc:      detail.append(f"~{est_loc} LoC est. from bytecode ({n_estimated} contracts)")
 if repo_loc:     detail.append(f"{repo_loc} repo LoC ({len(repos)} repos)")
 if direct_loc:   detail.append(f"{direct_loc} direct-source LoC ({n_direct} files)")
+if inline_loc:   detail.append(f"{inline_loc} LoC pasted in the description")
 if unmeasured:   detail.append(f"{unmeasured} target(s) unmeasurable, counted as 0")
 detail = "; ".join(detail) or "nothing measurable"
 
