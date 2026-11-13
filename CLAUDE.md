@@ -275,6 +275,20 @@ stand between that and a client:
   `⚠️ … in 6 min, 1 note — too fast for a full audit`. It reads only the
   chain, so it still speaks if the VM gate is skipped or bypassed.
 
+- **Agents started is not agents returned — `scripts/leftclaw/lens_check.py`**
+  (2026-11-13). From job 994 on, attack agents were being stopped mid-run by
+  the API safeguard and audits shipped with 5–11 of the 12 lenses; the stage
+  note said so and nothing read it. `complete.sh` now counts the lenses that
+  returned real work (by the `agent-N-bundle.md` each agent opened) and, when
+  short of 12, writes an on-chain `delivery-check` note that the host alert
+  turns into `⚠️ … attack lenses 9/12 — missing: …`. It never blocks. The
+  cause found that day: pashov's `shared-rules.md` ordered agents to print
+  their reasoning as `[Feynman: …]` markers (`reasoning_extraction` stops);
+  `provisionAuditorAgent.sh` strips that section at every boot. It cut the
+  stops from ~half of all spawns to a rare one — **never ask a sub-agent to
+  show its reasoning**, and an "ignore that rule" line in the prompt does not
+  work, the text has to be out of the bundle.
+
 Tests: `python3 tests/test_pipeline_gate.py` (offline). If a job is stuck
 with "REFUSED" in the VM, the audit really is short — look at
 `~/.claude/projects/*/*/subagents/` in the guest before overriding.

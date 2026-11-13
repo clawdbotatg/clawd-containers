@@ -4,6 +4,7 @@
   "97 min, 4 notes"                              a normal audit
   "FAST 6 min, 1 note — too fast for a full audit"
   "FAST 9 min, 2 notes — not Solidity: browser JS diff, web/*.js only"
+  "FAST 97 min, 5 notes — attack lenses 9/12 — missing: 2 access-control, …"
 
 Host-side and independent of the VM: it reads only the chain (accept ->
 complete time from block TIMESTAMPS, the progress notes). So it still
@@ -57,6 +58,12 @@ def summarize(mc, logs, ts):
         return f"FAST {base} — not Solidity: {why}" if minutes < FAST_MINUTES else f"{base}, not Solidity: {why}"
     if minutes < FAST_MINUTES:
         return f"FAST {base} — too fast for a full audit"
+    # complete.sh writes this note only when fewer than 12 attack agents
+    # returned work (lens_check.py). "FAST" is the wrangler's ⚠️ prefix; the
+    # line reads "… completed job N in 97 min, 4 notes — attack lenses 9/12 …".
+    short = [s for s in notes if s.startswith("Attack lenses returned:")]
+    if short:
+        return f"FAST {base} — attack lenses {short[-1][len('Attack lenses returned:'):].strip()[:200]}"
     return base
 
 

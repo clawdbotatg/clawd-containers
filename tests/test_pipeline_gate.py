@@ -232,9 +232,118 @@ def test_complete():
     b.close()
 
 
+def lens_agent(box, sess, idx, lens, how, via="read"):
+    """One attack-agent transcript. how: ok | api_error | classifier | empty | cut"""
+    sub = os.path.join(box.proj, sess, "subagents")
+    os.makedirs(sub, exist_ok=True)
+    bundle = f"/Users/admin/audits/{box.job}/repo/.audit-x/agent-{lens}-bundle.md"
+    prompt = f"Read {bundle} then attack." if via == "prompt" else "Read tools/p2-agent.txt first."
+    rows = [{"type": "user", "message": {"content": prompt}}]
+    if via == "read":
+        rows.append({"type": "assistant", "message": {"stop_reason": "tool_use", "content": [
+            {"type": "tool_use", "id": "t1", "name": "Read", "input": {"file_path": bundle}}]}})
+    body = "FINDING | contract: Vault | function: settle | bug_class: rounding\n" + "detail " * 60
+    if how == "ok":
+        rows.append({"type": "assistant", "message": {"stop_reason": "end_turn",
+                     "content": [{"type": "text", "text": body}]}})
+    elif how == "api_error":
+        rows.append({"type": "assistant", "message": {"stop_reason": "refusal", "content": []}})
+        rows.append({"type": "assistant", "message": {"stop_reason": "refusal", "content": [
+            {"type": "text", "text": "API Error: Opus 5.5's safeguards flagged this message. " + "x" * 400}]}})
+    elif how == "classifier":
+        rows.append({"type": "assistant", "message": {"stop_reason": "end_turn", "content": [
+            {"type": "text", "text": "A safety classifier stopped my last response, so this run "
+             "has no findings. " + "What I did read: the bundle. " * 20}]}})
+    elif how == "cut":      # partial findings, then stopped mid-output
+        rows.append({"type": "assistant", "message": {"stop_reason": "refusal",
+                     "content": [{"type": "text", "text": body}]}})
+    with open(os.path.join(sub, f"agent-{idx}.jsonl"), "w") as fh:
+        for r in rows:
+            fh.write(json.dumps(r) + "\n")
+
+
+def lens(box):
+    r = subprocess.run([sys.executable, os.path.join(LC, "lens_check.py")],
+                       capture_output=True, text=True, env=box.env(), timeout=60)
+    return r.stdout.strip()
+
+
+def test_lens():
+    print("lens_check.py")
+
+    b = Box(); b.session("live", 23, subfiles=0)
+    for n in range(1, 13):
+        lens_agent(b, "live", n, n, "ok", via="read" if n % 2 else "prompt")
+    check("12 returned: 12/12", lens(b), "12/12")
+    rc, sent, out = b.complete()
+    check("…delivers", rc, 0)
+    check("…and writes no extra note", "logWork" in sent, False)
+    b.close()
+
+    # the 1222 re-run on Opus: 2, 8, 9 stopped twice; 1, 3, 6 saved by a respawn
+    b = Box(); b.session("live", 23, subfiles=0)
+    i = 0
+    for n in range(1, 13):
+        first = {1: "api_error", 3: "api_error", 6: "classifier",
+                 2: "classifier", 8: "classifier", 9: "classifier"}.get(n, "ok")
+        i += 1; lens_agent(b, "live", i, n, first)
+        if first != "ok":
+            i += 1; lens_agent(b, "live", i, n, "api_error" if n in (2, 8, 9) else "ok")
+    check("respawn saves a lens; a lens stopped twice is missing", lens(b),
+          "9/12 — missing: 2 access-control, 8 asymmetry, 9 boundary")
+    rc, sent, out = b.complete()
+    check("short run still delivers (never blocks)", (rc, sent.count("completeJob")), (0, 1))
+    check("…with the on-chain note first", "logWork" in sent
+          and sent.index("logWork") < sent.index("completeJob"), True)
+    check("…naming the missing lenses", "9/12" in sent and "asymmetry" in sent, True)
+    b.close()
+
+    b = Box(); b.session("live", 23, subfiles=0)
+    for n in range(1, 13):
+        lens_agent(b, "live", n, n, "cut" if n == 4 else ("empty" if n == 12 else "ok"))
+    check("cut off mid-output and empty both count as missing", lens(b),
+          "10/12 — missing: 4 execution-trace, 12 flow-gap")
+    b.close()
+
+    # wave 1 blocked, the rest never started (job 994, job 1221's first try)
+    b = Box(); b.session("live", 23, subfiles=0)
+    for n in (1, 2, 3):
+        lens_agent(b, "live", n, n, "api_error")
+    check("only wave 1 ran and all were stopped: 0/12", lens(b).startswith("0/12 — missing: 1 math"), True)
+    b.close()
+
+    b = Box(); b.session("live", 23)          # context/checklist agents only
+    check("no attack-agent log at all is said plainly", lens(b), "0/12 — no attack-agent log found")
+    b.close()
+
+    # not an audit VM / not Solidity: the lens check is never reached
+    b = Box(auditor=False); b.session("live", 0)
+    check("builder VM: no lens note", "logWork" in b.complete()[1], False); b.close()
+
+    sys.path.insert(0, LC)
+    import delivery_summary as ds
+
+    class MC:
+        EV_ACCEPTED, EV_COMPLETED, EV_WORK = "a", "c", "w"
+        @staticmethod
+        def decode_strings(d):
+            return d
+    def logs(notes):
+        return ([{"topics": ["a"], "blockNumber": "0x1"}]
+                + [{"topics": ["w"], "blockNumber": "0x2", "data": n} for n in notes]
+                + [{"topics": ["c"], "blockNumber": "0x3"}])
+    ts = {1: 0, 3: 97 * 60}.get
+    check("alert line: normal audit", ds.summarize(MC, logs([["a", "x"]] * 4), ts), "97 min, 4 notes")
+    check("alert line: short lenses become a warning",
+          ds.summarize(MC, logs([["a", "x"]] * 4 + [["delivery-check",
+              "Attack lenses returned: 9/12 — missing: 2 access-control"]]), ts),
+          "FAST 97 min, 5 notes — attack lenses 9/12 — missing: 2 access-control")
+
+
 if __name__ == "__main__":
     test_gate()
     test_complete()
+    test_lens()
     if FAILED:
         print(f"\n{len(FAILED)} FAILED: {', '.join(FAILED)}")
         sys.exit(1)

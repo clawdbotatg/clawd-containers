@@ -44,6 +44,17 @@ if [[ -f "$HOME/auditor.prompt.md" && -f "$HERE/pipeline_gate.py" && "${PIPELINE
     echo "pipeline gate: delivered as NOT SOLIDITY — $WHY"
   elif [[ -x "$PY" ]]; then
     "$PY" "$HERE/pipeline_gate.py" "$1" || exit 3
+    # Agents STARTED is not agents RETURNED (jobs 994-1223 shipped with 5-11
+    # of the 12 attack lenses). Never blocks: a short count goes on-chain and
+    # the host turns it into a ⚠️ on the operator's completion alert.
+    if [[ -f "$HERE/lens_check.py" ]]; then
+      LENS="$("$PY" "$HERE/lens_check.py" 2>/dev/null | head -1 || true)"
+      echo "lens check: ${LENS:-no answer}"
+      if [[ -n "$LENS" && "$LENS" != "12/12" ]]; then
+        "$HERE/log-work.sh" "$1" "delivery-check" "Attack lenses returned: ${LENS:0:260}" \
+          >/dev/null 2>&1 || echo "warning: could not log the lens-check note" >&2
+      fi
+    fi
   else
     echo "pipeline gate: WARNING — no python3; cannot verify the pipeline ran" >&2
   fi
