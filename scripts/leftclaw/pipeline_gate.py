@@ -157,7 +157,8 @@ independent agents; a one-reviewer pass is a different product.
 
 Do this now:
   1. Open ~/skills/two-phase-audit-v3.md and run every phase you have not
-     run, spawning the agents for real (model: "fable", waves of 3).
+     run, spawning the agents for real, in waves of 3 (model "fable" for
+     phases 0 and 1, "opus" for the 12 attack agents).
   2. Rebuild ~/audits/{job}/final-report.md from their output, re-upload it,
      log the stage notes.
   3. Call complete.sh again with the new URL.

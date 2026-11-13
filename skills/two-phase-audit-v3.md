@@ -75,9 +75,18 @@ In one message:
    Holds `protocol-map.md`, `phase1-report.md`, `phase2-report.md`, `unified-report.md`.
 4. **Scope sizing → default model for the HUNTING phases.** Same rule as v2:
    `{scope}` = **small** if total in-scope `.sol` LOC < ~600 (regardless of file
-   count), else **large**. Default `{agent_model}` for phases 1 & 2:
-   `fable` (Fable 5.2) for BOTH scopes (2026-11-09; was small → `sonnet`, large →
-   `opus`). Agent *count* never scales.
+   count), else **large**. Models, for BOTH scopes (the scope no longer picks one):
+   phase 1 `{agent_model}` = `fable` (Fable 5.2, 2026-11-09); **phase 2
+   `{attack_model}` = `opus` (Opus 5.5, 2026-11-13)**. Agent *count* never scales.
+   Why phase 2 differs: `opus` is the model the fix below was proven on. The real
+   cause of the lost attack agents (jobs 994–1223: 5 to 11 of 12 back, phase 2
+   hanging past the 2h stage budget) was not the model: pashov's `shared-rules.md`
+   ordered each agent to print its reasoning as `[Feynman: …]` markers, and the
+   API's safeguard stopped those agents (`reasoning_extraction`) on Fable 5.2 and
+   Opus 5.5 alike — 9 of 18 and 8 of 17 spawns in two re-runs of job 1222.
+   `provisionAuditorAgent.sh` now deletes that section from the rules file at boot;
+   the third re-run got 12 of 12 with zero stops. Never put the marker rule back,
+   and never ask an agent to show its reasoning.
 5. **Model selection — once, here.** Same rules as v2 (interactive → pashov Turn 1b
    picker; autonomous/headless → `{scope}` default silently; no-`model`-param runtimes
    → leave unset). **Phase 0 is exempt:** always `fable`. **Phase 0a is exempt the
@@ -173,12 +182,19 @@ restated here against V4's turn names rather than applied verbatim:
 - **Turn 1b — one pass, memory off, no question.** Behave exactly as if `--loop 1`
   had been passed: `{passes}` = 1, skip the pass question silently (V4's own
   Turn 1b-iii rule for a flag), never print the Turn 1b-ii fallback block, and never
-  stop to wait. `{agent_model}` was chosen at Turn 0 — skip the model question too.
+  stop to wait. The model was chosen at Turn 0 — skip the model question too:
+  **for this phase V4's `{agent_model}` is `{attack_model}` = `opus`**, so every one
+  of the 12 Turn 3a spawns carries `model: "opus"` (not `fable`).
   Memory stays off: no `--memory`, so Turn 1c, Turn 2 step 2 and Turn 4 steps 4 and 6
   are all skipped, and nothing is written to `.solidity-auditor/memory.tsv`. Each
   extra pass is another full 12-agent fan-out; the pipeline's burn budget is one.
 - **Turn 1e (remote VERSION curl) — skip it.** This tree is pinned on purpose; the
   "not using the latest version" warning is noise here.
+- **Turn 3a — an agent that comes back empty is respawned once.** If an attack
+  agent returns no output, errors, or is stopped by a model safeguard, spawn that
+  one agent again (same bundle, `model: "opus"`) before moving to the next wave. If
+  it fails twice, go on, and say in the stage note and the report exactly which of
+  the 12 lenses did not run — never "12 agents" when fewer delivered.
 - **Turn 3a — staggered spawn (v2's 2026-08-18 rule).** Build all 12 bundles and run
   all 12 agents exactly as V4 specifies — full coverage, nothing cut — but spawn them
   in **waves of 3** (agents 1–3, then 4–6, 7–9, 10–12), waiting for every agent in a

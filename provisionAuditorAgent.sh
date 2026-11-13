@@ -109,6 +109,35 @@ else
   exit 1
 fi
 
+# Delete pashov's "Mental tool protocol" from the attack agents' rules file.
+# That section orders every agent to PRINT its reasoning as [Feynman: …] /
+# [Socratic: …] / [Inversion: …] markers. The API's safeguard reads that as
+# reasoning extraction and stops the agent: jobs 994–1223 lost 1 to 12 of the
+# 12 attack agents, and two re-runs of job 1222 lost 9 of 18 and 8 of 17
+# spawns. With the section gone the third re-run got 12 of 12, zero stops
+# (2026-11-13). A prompt line saying "ignore it" did NOT work — the text has
+# to be out of the bundle. The pashov trees are gitignored per-box clones, so
+# this runs here, at every boot, and survives a skills refresh. The SOP still
+# teaches the three tools; only the print-it-out order is removed.
+python3 - <<'PYEOF' || echo "WARNING: could not strip the marker protocol from shared-rules.md" >&2
+import glob, os
+for p in glob.glob(os.path.expanduser("~/skills/pashov-skills*/solidity-auditor/references/hacking-agents/shared-rules.md")):
+    s = open(p).read()
+    a, b = s.find("## Mental tool protocol"), s.find("## Cross-contract patterns")
+    if a < 0:
+        print("marker protocol: not present in", p); continue
+    if b < a:
+        print("WARNING: marker protocol found but its end was not, left as is:", p); continue
+    s = s[:a] + s[b:]
+    s = s.replace(", AND mandatory mental tool protocol)", ")")
+    i = s.find("**The protocol below applies continuously")
+    if i >= 0:
+        j = s.find("\n\n", i)
+        s = s[:i] + s[j + 2:] if j > 0 else s
+    open(p, "w").write(s)
+    print("marker protocol: removed from", p)
+PYEOF
+
 # --- .env.auditor and prompt file --------------------------------------
 # AGENT_ENV_FILE lets one provisioner serve multiple auditor instances
 # (auditor2 was silently getting auditor1's wallet before this, so its
