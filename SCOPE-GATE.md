@@ -29,7 +29,11 @@ expensive: it hands a paying client their money back in about 30 seconds.
 **The budget measures LINES, not targets.** Ten small contracts are fine;
 one 24KB monolith is not (job 326 time-capped forever at 3,788 LoC; job 443
 was 10 contracts, several at the EIP-170 cap). `MAX_AUDIT_SOL_LOC` defaults
-to 3000.
+to **4000** (raised from 3000 on 2026-11-13, Austin: job 1187 was really
+3,507 lines and finished a full audit in 92 minutes under the 8h cap; the
+3000 figure dated from the old 2h cap). Verdicts quoted below from before
+that date were measured against 3000 — at 4000, job 621 (3,609) passes on
+size, which is policy, not an under-count.
 
 **It fails open on purpose.** An unmeasurable target counts 0. A probe
 failure must never refuse a paying client. Keep that property.

@@ -44,7 +44,7 @@
 # .flat.sol supersets of each other, each embedding OZ) count their real
 # unique code, not 8K lines of vendored duplication.
 #
-# Verdict: total LoC > MAX_AUDIT_SOL_LOC (default 3000) → too_complex.
+# Verdict: total LoC > MAX_AUDIT_SOL_LOC (default 4000) → too_complex.
 # Unmeasurable targets count 0 — fail open; a probe failure must never
 # refuse a paying client.
 #
@@ -97,13 +97,13 @@ if [ -s "$CACHE_FILE" ]; then
   exit 0
 fi
 
-MAX_AUDIT_SOL_LOC="${MAX_AUDIT_SOL_LOC:-3000}" \
+MAX_AUDIT_SOL_LOC="${MAX_AUDIT_SOL_LOC:-4000}" \
 BYTES_PER_LOC="${BYTES_PER_LOC:-20}" \
 ALCHEMY_API_KEY="${ALCHEMY_API_KEY:-}" \
 python3 - "$JOB_JSON" > "$CACHE_FILE.tmp" <<'PY'
 import hashlib, json, os, re, shutil, subprocess, sys, tempfile, urllib.request
 
-MAX_LOC   = int(os.environ.get("MAX_AUDIT_SOL_LOC", "3000"))
+MAX_LOC   = int(os.environ.get("MAX_AUDIT_SOL_LOC", "4000"))
 BYTES_LOC = int(os.environ.get("BYTES_PER_LOC", "20"))
 ALCHEMY   = os.environ.get("ALCHEMY_API_KEY", "")
 
