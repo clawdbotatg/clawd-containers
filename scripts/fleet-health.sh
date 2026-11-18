@@ -27,7 +27,7 @@ hdr "audit VMs (running = burning tokens)"
 running=$(tart list 2>/dev/null | awk '$NF=="running"{print $2}')
 if [[ -z "$running" ]]; then ok "no VMs running (fleet idle)"; else
   for vm in $running; do
-    cap=14400; [[ "$vm" == auditor* ]] || cap=7200
+    cap=28800; [[ "$vm" == auditor* ]] || cap=7200   # = TIME_CAP_AUDITOR_SECONDS in agent-wrangler.sh
     if [[ -f "$STATE/$vm.started" ]]; then
       el=$(( $(date +%s) - $(cat "$STATE/$vm.started") ))
       pct=$(( el * 100 / cap ))

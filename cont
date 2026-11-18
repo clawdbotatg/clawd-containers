@@ -1188,18 +1188,27 @@ tokens_busy() {
   done
 }
 
-# Probe every token (1-token haiku call, read the unified rate-limit
-# headers; the usage endpoint refuses setup-tokens). One line per token:
+# Probe every token (1-token call, read the unified rate-limit headers;
+# the usage endpoint refuses setup-tokens). One line per token:
 #   NAME STATUS HEADROOM RESET_EPOCH
 # STATUS ok | dead (401/403 — revoked/expired, mint a new one) |
-# limited (429) | err. HEADROOM = 100 - worst of the 5h/7d windows.
+# limited (429) | err. HEADROOM = 100 - worst of EVERY window returned.
+#
+# The probe must use the model the VMs run (CONT_PROBE_MODEL, default the
+# auditor's). A plan has a separate weekly window for the top model
+# (`7d_oi`) that the API only reports — and only enforces — on a request
+# for that model. 2026-11-18: this probed with haiku, read 5h/7d, and
+# showed a token at 48% headroom while its Fable week was at 100%; the
+# picker booted auditor2 onto it, the session died on its first turn
+# ("You've reached your Fable limit") and job 1247 sat dead for hours.
 token_report() {
   local f; f="$(tokens_file)" || return 1
   python3 - "$f" <<'PY'
 import json, re, sys, urllib.request, urllib.error
 from concurrent.futures import ThreadPoolExecutor
 toks = re.findall(r'^CLAUDE_TOKEN_([A-Z0-9_]+)=(sk-ant-oat\S+)', open(sys.argv[1]).read(), re.M)
-body = json.dumps({"model": "claude-haiku-4-5-20251001", "max_tokens": 1,
+import os
+body = json.dumps({"model": os.environ.get("CONT_PROBE_MODEL") or "claude-fable-5-2", "max_tokens": 1,
     "system": "You are Claude Code, Anthropic's official CLI for Claude.",
     "messages": [{"role": "user", "content": "hi"}]}).encode()
 def probe(nt):
@@ -1217,20 +1226,23 @@ def probe(nt):
     if code in (401, 403):
         return f"{name} dead 0 0"
     worst, reset = None, 0
-    for w in ("5h", "7d"):
-        u = h.get(f"anthropic-ratelimit-unified-{w}-utilization")
-        if u is None:
+    for k, u in h.items():
+        m = re.fullmatch(r"anthropic-ratelimit-unified-(.+)-utilization", k.lower())
+        if not m:
             continue
-        u = float(u)
+        try:
+            u = float(u)
+        except ValueError:
+            continue
         if worst is None or u > worst:
-            worst, reset = u, int(h.get(f"anthropic-ratelimit-unified-{w}-reset") or 0)
+            worst, reset = u, int(h.get(f"anthropic-ratelimit-unified-{m.group(1)}-reset") or 0)
     if code == 429:
         # Window walled = 0 headroom; a bare 429 with no headers is a
         # transient rate limit, not a verdict on the subscription.
         return f"{name} limited 0 {reset}" if worst is not None else f"{name} err 0 0"
     if code != 200:
         return f"{name} err 0 0"
-    return f"{name} ok {round(100 - 100 * (worst or 0))} {reset}"
+    return f"{name} ok {max(0, round(100 - 100 * (worst or 0)))} {reset}"
 with ThreadPoolExecutor(8) as ex:
     for line in ex.map(probe, toks):
         print(line)

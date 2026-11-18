@@ -113,6 +113,20 @@ Everything about OAuth logins below only applies in login mode
 harness's `tools/install_claude_tokens.py`. **Never put a token in this repo
 — it's public.**
 
+**The token probe must use the VMs' model** (`CONT_PROBE_MODEL`, default
+`claude-fable-5-2`). A plan has a separate weekly window for the top model
+(`7d_oi` in the rate-limit headers) that the API reports only on a request
+for that model. Probing with haiku (until 2026-11-18) showed tokens at
+40–48% headroom while their Fable week was at 100%: auditor2 booted onto
+one, died on its first turn ("You've reached your Fable limit") and held
+job 1247 dead for two hours. `cont token list` now shows such a token as
+`limited`. Two wrangler alerts came out of the same incident:
+`🧱 … hit a usage limit` — the guest's last turn is a rate-limit error, so
+the VM is recycled onto another token right away (max 3 per job) instead of
+waiting out the 8h cap; and `💬 job N client: …` — every client message on a
+job we hold (`scripts/leftclaw/client_watch.py`), because the job chat is
+otherwise read only by the site's AI.
+
 ## Deploy = `git push` (the wrangler pulls itself)
 
 `agent-wrangler.sh` self-updates every 5 minutes (`self_update`, added

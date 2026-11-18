@@ -898,6 +898,75 @@ agent_alive() {
   timeout 8 ./cont ssh "$vm" 'pgrep -f "[c]laude" >/dev/null 2>&1' 2>/dev/null
 }
 
+# Did the guest's claude session die on a usage limit? Prints the limit
+# text (e.g. "You've reached your Fable limit. /model to switch models.")
+# and exits 0 if the LAST assistant turn in the newest session transcript
+# is a rate-limit error and the transcript has been quiet for a minute.
+# An unattended session never recovers from that: nobody types again, so
+# the VM just holds its job and its slot until the 8h cap (job 1247,
+# 2026-11-18: two hours dead with the client asking in the job chat).
+# Reads Claude Code's own log, never terminal text. Unreachable guest, no
+# transcript, or only one older than this boot -> exit 1 (says nothing).
+agent_limit_dead() {
+  local vm="$1" out
+  out=$(timeout 10 ./cont ssh "$vm" 'f=$(ls -t ~/.claude/projects/*/*.jsonl 2>/dev/null | head -1)
+[ -n "$f" ] || exit 1
+m=$(stat -f %m "$f"); boot=$(sysctl -n kern.boottime | sed -E "s/.*sec = ([0-9]+).*/\\1/")
+[ "$m" -ge "${boot:-0}" ] || exit 1   # a session baked into the gold image
+[ $(( $(date +%s) - m )) -gt 60 ] || exit 1
+tail -c 200000 "$f" | grep -E "\"type\": ?\"assistant\"" | tail -1 \
+  | grep -E "\"error\": ?\"rate_limit\"" \
+  | sed -E "s/.*\"text\": ?\"([^\"]{0,120}).*/\1/"' 2>/dev/null) || return 1
+  [[ -n "$out" ]] || return 1
+  printf '%s\n' "$out"
+}
+
+# Recycle a VM whose session died on a usage limit, so the next boot rides
+# another token (`cont token pick` probes with the VM's model and skips a
+# walled one). At most LIMIT_MAX_RECYCLES per job — if the picker and the
+# guest ever disagree about a token, this must not become a boot loop; past
+# that it only alerts and the stall/cap path takes over. Returns 0 if it
+# stopped the VM.
+LIMIT_MAX_RECYCLES="${LIMIT_MAX_RECYCLES:-3}"
+LIMIT_RECYCLES_FILE="$STATE_DIR/limit-recycles"
+recycle_if_limit_dead() {
+  local vm="$1" jid="$2" why tok n
+  why=$(agent_limit_dead "$vm") || return 1
+  tok=$(cat "$HOME/.config/cont/vm-tokens/$vm" 2>/dev/null || true)
+  n=$(kv_get "${jid:-none}" "$LIMIT_RECYCLES_FILE")
+  if (( n >= LIMIT_MAX_RECYCLES )); then
+    log "  $vm: session dead on a usage limit${tok:+ (token $tok)} — already recycled ${n}x for job ${jid:-none}, leaving it to the cap"
+    # Say it once per job, not every tick.
+    [[ -f "$STATE_DIR/job.${jid:-none}.limit-alerted" ]] && return 1
+    touch "$STATE_DIR/job.${jid:-none}.limit-alerted"
+    notify "🧱 ${vm}${jid:+ (job $jid)} is dead on a usage limit again${tok:+ (token $tok)} after ${n} recycles — needs a look: \"${why}\""
+    return 1
+  fi
+  kv_set "${jid:-none}" $(( n + 1 )) "$LIMIT_RECYCLES_FILE"
+  log "  $vm: session dead on a usage limit${tok:+ (token $tok)}: ${why} — recycling onto another token ($(( n + 1 ))/${LIMIT_MAX_RECYCLES})"
+  notify "🧱 ${vm}${jid:+ (job $jid)} hit a usage limit${tok:+ on token $tok} — \"${why}\" Rebooting it on another token."
+  rm -f "$STATE_DIR/$vm.progress-sig" "$STATE_DIR/$vm.progress-at"
+  stop_vm "$vm" "session dead on a usage limit${tok:+ (token $tok)}"
+  return 0
+}
+
+# Forward what the CLIENT writes in a held job's chat. That chat is answered
+# by the site's AI and nothing else read it: on job 1247 the client asked
+# three times when a dead job would be picked up and no human ever saw it.
+# One alert per message (ids remembered in $STATE_DIR/client-msgs.seen).
+client_message_watch() {
+  local vm="$1" jid="$2" env="$3" line
+  [[ -n "$jid" ]] || return 0
+  ( set -a; source "$env" 2>/dev/null; set +a
+    ./scripts/leftclaw/messages.sh "$jid" 2>/dev/null
+  ) | python3 ./scripts/leftclaw/client_watch.py "$STATE_DIR/client-msgs.seen" 2>/dev/null \
+    | while IFS= read -r line; do
+        [[ -n "$line" ]] || continue
+        log "  job $jid: client message — $line"
+        notify "💬 job ${jid} (${vm}) client: ${line}"
+      done || true
+}
+
 # First job assigned to this wallet (OPEN/IN_PROGRESS), or empty.
 get_assigned_job_id() {
   local svc="$1" env="$2"
@@ -1363,6 +1432,14 @@ while :; do
       ./cont harvest "$vm" >>"$LOG" 2>&1 || true
       cap=$(cap_for "$vm")
       elapsed=$(elapsed_seconds "$vm")
+      # A session that died on a usage limit never comes back by itself —
+      # recycle now (onto another token) instead of waiting out stall/cap.
+      held_jid=""
+      [[ "$mine" =~ ^[1-9] ]] && held_jid=$(get_assigned_job_id "$svc" "$env")
+      client_message_watch "$vm" "$held_jid" "$env"
+      if recycle_if_limit_dead "$vm" "$held_jid"; then
+        continue
+      fi
       if (( elapsed > cap )) && delivery_hold "$vm" "$(get_assigned_job_id "$svc" "$env")" "$env" "cap ${elapsed}s/${cap}s"; then
         : # report built but undelivered — hold through the cap, don't wipe a finished audit
       elif (( elapsed > cap )); then
