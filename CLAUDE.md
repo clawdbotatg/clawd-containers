@@ -127,6 +127,17 @@ waiting out the 8h cap; and `💬 job N client: …` — every client message on
 job we hold (`scripts/leftclaw/client_watch.py`), because the job chat is
 otherwise read only by the site's AI.
 
+**Opus fallback (Austin, 2026-11-18).** Auditors stay on Fable; when no free
+token has Fable headroom, `cont token pick-full` picks one with room on
+`CONT_FALLBACK_MODEL` (default `claude-opus-5-5`, `""` = off) and the VM runs
+the whole audit on that model: the host ships `~/.audit-model`, and
+`claude-startup.sh` launches with it and prepends a prompt override ("use
+`opus` wherever the skill says `fable`"). Same pipeline, same agent counts.
+`cont token list` shows both headrooms and which VM is on the fallback; the
+🟢 start alert names the model. Only auditors honor it. Whether Opus matches
+Fable on the orchestrator and checklist agents is **unmeasured** — phase 2
+has been on Opus since 11-13.
+
 ## Deploy = `git push` (the wrangler pulls itself)
 
 `agent-wrangler.sh` self-updates every 5 minutes (`self_update`, added

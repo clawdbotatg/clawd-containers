@@ -1179,7 +1179,11 @@ start_vm() {
   else
     log "  custody hop unavailable — selection stays on the login inside $vm (shared custody, refresh contention possible)"
   fi
-  notify "🟢 ${vm} starting ${desc}"
+  # Say so when the token's Fable week is spent and this boot runs on the
+  # fallback model instead (`cont token pick-full`, auditors only).
+  local fbm; fbm=$(cat "$HOME/.config/cont/vm-models/$vm" 2>/dev/null || true)
+  [[ -n "$fbm" ]] && log "  $vm runs on fallback model $fbm (no Fable headroom on its token)"
+  notify "🟢 ${vm} starting ${desc}${fbm:+ — on ${fbm} (no Fable left on this subscription)}"
   # Settle time so claude has Aqua + LaunchAgent + iTerm + scripts up
   # before the next loop iteration sees the queue change.
   sleep 30

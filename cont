@@ -1201,6 +1201,12 @@ tokens_busy() {
 # showed a token at 48% headroom while its Fable week was at 100%; the
 # picker booted auditor2 onto it, the session died on its first turn
 # ("You've reached your Fable limit") and job 1247 sat dead for hours.
+#
+# Two more columns: FB_STATUS FB_HEADROOM — the same probe on the FALLBACK
+# model (CONT_FALLBACK_MODEL, default Opus; "" turns it off, columns "- 0").
+# A token whose top-model week is spent usually still has plenty of the
+# ordinary week, and an audit on Opus beats a client waiting days for the
+# window to reset (Austin, 2026-11-18). See token_pick_full.
 token_report() {
   local f; f="$(tokens_file)" || return 1
   python3 - "$f" <<'PY'
@@ -1208,11 +1214,19 @@ import json, re, sys, urllib.request, urllib.error
 from concurrent.futures import ThreadPoolExecutor
 toks = re.findall(r'^CLAUDE_TOKEN_([A-Z0-9_]+)=(sk-ant-oat\S+)', open(sys.argv[1]).read(), re.M)
 import os
-body = json.dumps({"model": os.environ.get("CONT_PROBE_MODEL") or "claude-fable-5-2", "max_tokens": 1,
-    "system": "You are Claude Code, Anthropic's official CLI for Claude.",
-    "messages": [{"role": "user", "content": "hi"}]}).encode()
+PRIMARY = os.environ.get("CONT_PROBE_MODEL") or "claude-fable-5-2"
+FALLBACK = os.environ.get("CONT_FALLBACK_MODEL", "claude-opus-5-5")
 def probe(nt):
     name, tok = nt
+    first = probe_model(name, tok, PRIMARY)
+    if not FALLBACK or FALLBACK == PRIMARY or first.split()[1] == "dead":
+        return first + " - 0"
+    fb = probe_model(name, tok, FALLBACK).split()
+    return f"{first} {fb[1]} {fb[2]}"
+def probe_model(name, tok, model):
+    body = json.dumps({"model": model, "max_tokens": 1,
+        "system": "You are Claude Code, Anthropic's official CLI for Claude.",
+        "messages": [{"role": "user", "content": "hi"}]}).encode()
     req = urllib.request.Request("https://api.anthropic.com/v1/messages", data=body, headers={
         "Authorization": "Bearer " + tok, "anthropic-beta": "oauth-2025-04-20",
         "anthropic-version": "2023-06-01", "content-type": "application/json",
@@ -1249,22 +1263,45 @@ with ThreadPoolExecutor(8) as ex:
 PY
 }
 
-# Pick the token for a new VM: the most headroom among tokens no running
-# VM holds, and at least CONT_MIN_HEADROOM (same floor and same "never
-# stack on a busy sub" rule as `account auto`). If nothing clears that,
-# fall back to the best live token anyway — a VM with a token beats a VM
-# with none (the wrangler's usage gate is what pauses the fleet).
-token_pick() {
-  local min="${CONT_MIN_HEADROOM:-15}" busy
+# Pick the token AND the model for a new VM. Prints "NAME MODEL"; MODEL is
+# "-" for the VM's normal model, or the fallback model id.
+#   1. a token no running VM holds, with >= CONT_MIN_HEADROOM on the normal
+#      model (same floor and "never stack on a busy sub" rule as
+#      `account auto`) — the most headroom wins;
+#   2. else a free token with that much on the FALLBACK model -> the VM
+#      runs on the fallback (auditors only honor it — provisionAuditorAgent);
+#   3. else the best live token anyway, busy or not — a VM with a token
+#      beats a VM with none (the wrangler's usage gate pauses the fleet).
+token_pick_full() {
+  local min="${CONT_MIN_HEADROOM:-15}" busy fb="${CONT_FALLBACK_MODEL-claude-opus-5-5}"
   busy="$(tokens_busy | tr '\n' ' ')"
-  token_report | awk -v min="$min" -v busy=" $busy " '
-    $2 == "ok" {
+  token_report | awk -v min="$min" -v busy=" $busy " -v fb="$fb" '
+    {
       free = index(busy, " " $1 " ") == 0
-      if (free && $3 >= min && $3 > bf) { bf = $3; bn = $1 }
-      if ($3 > ba || an == "") { ba = $3; an = $1 }
+      if ($2 == "ok") {
+        if (free && $3 >= min && $3 > p1) { p1 = $3; n1 = $1 }
+        if ($3 >= min && ($3 > p3 || n3 == "")) { p3 = $3; n3 = $1 }
+        if ($3 > p5 || n5 == "") { p5 = $3; n5 = $1 }
+      }
+      if (fb != "" && $5 == "ok") {
+        if (free && $6 >= min && $6 > p2) { p2 = $6; n2 = $1 }
+        if ($6 >= min && ($6 > p4 || n4 == "")) { p4 = $6; n4 = $1 }
+      }
     }
-    END { if (bn != "") print bn; else if (an != "") print an; else exit 1 }'
+    END {
+      if (n1 != "") print n1, "-"
+      else if (n2 != "") print n2, fb
+      else if (n3 != "") print n3, "-"
+      else if (n4 != "") print n4, fb
+      else if (n5 != "") print n5, "-"
+      else exit 1
+    }'
 }
+token_pick() { local out; out="$(token_pick_full)" || return 1; printf '%s\n' "${out%% *}"; }
+
+# Model a running/just-provisioned VM was told to use ("" = its normal one).
+VM_MODELS_DIR="$CONFIG_DIR/vm-models"
+mkdir -p "$VM_MODELS_DIR"
 
 token_keepalive() {
   local name st rest dead=0
@@ -1289,24 +1326,31 @@ cmd_token() {
       token_mode || { echo "no tokens on this box (login mode)"; return 1; }
       local busy name st hr reset when held
       busy="$(for f in "$VM_TOKENS_DIR"/*; do [[ -f "$f" ]] && vm_running "$(basename "$f")" && printf '%s=%s ' "$(cat "$f")" "$(basename "$f")"; done; true)"
-      while read -r name st hr reset; do
+      local fst fhr fbn="${CONT_FALLBACK_MODEL-claude-opus-5-5}" fbs vmm
+      fbn="${fbn#claude-}"; fbn="${fbn%%-*}"
+      while read -r name st hr reset fst fhr; do
         when="-"; (( reset > 0 )) && when="$(date -r "$reset" '+%a %H:%M')"
         held="$(printf '%s' "$busy" | tr ' ' '\n' | sed -n "s/^$name=//p" | paste -sd, -)"
-        printf '%-22s %-8s headroom %3s%%  resets %-10s %s\n' "$name" "$st" "$hr" "$when" "${held:+in use by $held}"
+        fbs=""; [[ "$fst" == "ok" ]] && fbs="  ${fbn} fallback ${fhr}%"
+        [[ "$fst" == "limited" ]] && fbs="  ${fbn} fallback 0%"
+        vmm=""; [[ -n "$held" && -s "$VM_MODELS_DIR/${held%%,*}" ]] && vmm=" on $(cat "$VM_MODELS_DIR/${held%%,*}")"
+        printf '%-22s %-8s headroom %3s%%  resets %-10s%s %s\n' "$name" "$st" "$hr" "$when" "$fbs" "${held:+ in use by $held$vmm}"
       done < <(token_report)
       ;;
     pick)  token_pick ;;
+    pick-full) token_pick_full ;;
     value) [[ -n "${2:-}" ]] || { echo "usage: cont token value <NAME>" >&2; return 2; }; token_value "$2" ;;
-    check) token_report | awk '$2=="ok"||$2=="limited"{f=1} END{exit !f}' ;;
+    check) token_report | awk '$2=="ok"||$2=="limited"||$5=="ok"||$5=="limited"{f=1} END{exit !f}' ;;
     usage)
       # "ok" if some token clears the floor, else "exhausted <earliest reset>".
       token_report | awk -v min="${CONT_MIN_HEADROOM:-15}" '
         $2=="ok" && $3>=min {ok=1}
+        $5=="ok" && $6>=min {ok=1}   # the fallback model still has room
         ($2=="ok"||$2=="limited") && $4>0 && (r==0 || $4<r) {r=$4}
         END { if (ok || NR==0) print "ok"; else if (r) { cmd="date -u -r " r " +%Y-%m-%dT%H:%M:%SZ"; cmd | getline t; print "exhausted " t } else print "ok" }'
       ;;
     keepalive) token_keepalive ;;
-    *) echo "usage: cont token [list|mode|pick|value <NAME>|check|usage|keepalive]" >&2; return 2 ;;
+    *) echo "usage: cont token [list|mode|pick|pick-full|value <NAME>|check|usage|keepalive]" >&2; return 2 ;;
   esac
 }
 
@@ -1645,8 +1689,11 @@ cmd_provision() {
   # Claude credentials → renamed in staging dir. Token mode ships ONLY a
   # 1-year token (cont-claude-token, no keychain blob): the guest wipes any
   # old login off its disk and runs on CLAUDE_CODE_OAUTH_TOKEN.
-  local tname=""
-  if token_mode && tname="$(token_pick)" && [[ -n "$tname" ]]; then
+  local tname="" tmodel=""
+  rm -f "$VM_MODELS_DIR/$name"
+  if token_mode && tname="$(token_pick_full)" && [[ -n "$tname" ]]; then
+    tmodel="${tname#* }"; tname="${tname%% *}"
+    [[ "$tmodel" == "-" || "$tmodel" == "$tname" ]] && tmodel=""
     # Harvest first if the disk still rides an old OAuth login — the guest
     # is about to delete that blob, and it may be the lineage tip.
     if [[ -f "$VM_ACCOUNTS_DIR/$name" ]] && vm_running "$name"; then
@@ -1657,7 +1704,11 @@ cmd_provision() {
     save_claude_account_blob >/dev/null 2>&1 || true
     [[ -f "$CLAUDE_ACCOUNT_FILE" ]] && cp "$CLAUDE_ACCOUNT_FILE" "$stage/cont-claude-account.json"
     ( umask 077; printf '%s' "$tname" > "$VM_TOKENS_DIR/$name" )
-    echo "==> $name rides token $tname"
+    echo "==> $name rides token $tname${tmodel:+ on FALLBACK model $tmodel}"
+    # Always ship the file (empty = normal model) so a stale one from the
+    # gold image can never linger in the guest.
+    printf '%s' "$tmodel" > "$stage/cont-claude-model"
+    [[ -n "$tmodel" ]] && printf '%s' "$tmodel" > "$VM_MODELS_DIR/$name"
   elif [[ -f "$CLAUDE_TOKEN_FILE" || -f "$CLAUDE_CREDS_FILE" ]]; then
     save_claude_credentials_blob >/dev/null 2>&1 || true
     save_claude_account_blob >/dev/null 2>&1 || true

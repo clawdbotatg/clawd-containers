@@ -93,7 +93,9 @@ min="${CONT_MIN_HEADROOM:-15}"
 while read -r line; do
   [[ -n "$line" ]] || continue
   st=$(awk '{print $2}' <<<"$line"); hr=$(awk '{print $4}' <<<"$line" | tr -d '%')
-  if [[ "$st" != ok ]]; then flag "$line"
+  fb=$(sed -n 's/.* fallback \([0-9]*\)%.*/\1/p' <<<"$line")
+  if [[ "$st" == limited && "$fb" =~ ^[0-9]+$ ]] && (( fb >= min )); then ok "$line"   # walled on Fable, auditors fall back
+  elif [[ "$st" != ok ]]; then flag "$line"
   elif [[ "$hr" =~ ^[0-9]+$ ]] && (( hr < min )); then flag "$line — under ${min}% floor"
   else ok "$line"; fi
 done < <("$HERE/cont" token list 2>&1)

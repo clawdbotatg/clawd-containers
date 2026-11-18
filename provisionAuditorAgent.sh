@@ -76,6 +76,16 @@ for fam in bgipfs leftclaw; do
   fi
 done
 
+# --- Fallback model for this boot (see claude-startup.sh below) -------------
+# Empty or missing file = the normal model. Always rewritten, so a value
+# baked into the gold image can never carry over to another token.
+rm -f "$HOME/.audit-model"
+if [[ -s /tmp/cont-claude-model ]]; then
+  cp /tmp/cont-claude-model "$HOME/.audit-model"
+  echo "==> this boot runs on FALLBACK model $(cat "$HOME/.audit-model")"
+fi
+rm -f /tmp/cont-claude-model
+
 echo "==> installing ~/skills/ (full trees)"
 mkdir -p "$HOME/skills"
 # Top-level pointer files. two-phase-audit-v2.md is the LIVE orchestrator
@@ -185,7 +195,21 @@ if [[ ! -f "$PROMPT_FILE" ]]; then
 fi
 PROMPT="$(cat "$PROMPT_FILE")"
 
-exec "$HOME/.local/bin/claude" --dangerously-skip-permissions --model claude-fable-5-2 "$PROMPT"
+# Fallback model (2026-11-18). The host ships ~/.audit-model when the token
+# this VM rides has no room left on Fable but does on another model (`cont
+# token pick-full`). Then the whole audit runs on that model: same pipeline,
+# same agent counts, only the model name changes. Without this the session
+# died on its first turn and the job sat until the 8h cap (job 1247).
+MODEL="claude-fable-5-2"
+if [[ -s "$HOME/.audit-model" ]]; then
+  MODEL="$(cat "$HOME/.audit-model")"
+  ALIAS="${MODEL#claude-}"; ALIAS="${ALIAS%%-*}"
+  PROMPT="**MODEL OVERRIDE FOR THIS RUN — read first.** This subscription has no Fable capacity left, so you are running on \`$MODEL\`. Wherever the audit skills name \`fable\` for a sub-agent (phase 0 context agents, phase 1 \`{agent_model}\`, any \`model: \"fable\"\`), use \`model: \"$ALIAS\"\` instead. Never spawn a \`fable\` agent in this run: it fails at once with a usage-limit error. Nothing else changes — same phases, same agent counts, same waves of 3, same delivery checks. In the final report's header, state the model the audit ran on.
+
+$PROMPT"
+fi
+
+exec "$HOME/.local/bin/claude" --dangerously-skip-permissions --model "$MODEL" "$PROMPT"
 EOSH
 chmod 755 "$HOME/.local/bin/claude-startup.sh"
 
