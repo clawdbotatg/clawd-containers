@@ -340,8 +340,85 @@ def test_lens():
           "FAST 97 min, 5 notes — attack lenses 9/12 — missing: 2 access-control")
 
 
+def two_jobs(first, second, stamp=True):
+    """One VM session that ran `first` agents for a delivered job, then
+    `second` for the job now being delivered. Returns the Box."""
+    import datetime
+    b = Box()
+    os.makedirs(b.proj, exist_ok=True)
+    t0 = time.time() - 3000            # first job's work: 50 min ago (after BOOT)
+    t1 = time.time() - 600             # second job's work: ten minutes ago
+    iso = lambda t: datetime.datetime.fromtimestamp(t, datetime.timezone.utc) \
+        .strftime("%Y-%m-%dT%H:%M:%S.000Z")
+    sub = os.path.join(b.proj, "live", "subagents")
+    os.makedirs(sub)
+    with open(os.path.join(b.proj, "live.jsonl"), "w") as fh:
+        for job, n, t in (("a", first, t0), ("b", second, t1)):
+            for i in range(n):
+                fh.write(json.dumps({"type": "assistant", "timestamp": iso(t + i),
+                    "message": {"content": [{"type": "tool_use", "id": f"{job}{i}",
+                                             "name": "Agent", "input": {}}]}}) + "\n")
+                open(os.path.join(sub, f"agent-{job}{i}.jsonl"), "w").write(
+                    json.dumps({"type": "user", "timestamp": iso(t + i),
+                                "message": {"content": "go"}}) + "\n")
+    if stamp:                          # complete.sh stamped the first delivery
+        open(os.path.join(b.home, ".pipeline-gate-delivered"), "w").write(
+            str(int(time.time() - 1800)))
+    return b
+
+
+def test_per_job():
+    """2026-11-18: one session delivered jobs 1248, 1249 and 1250; the gate
+    counted since boot, so job 1250 read "70 sub-agents ran" and a later job
+    with none would have passed."""
+    print("per job, not per boot")
+
+    b = two_jobs(24, 0)
+    check("second job with ZERO agents is refused (first job ran 24)", b.gate()[0], 3)
+    check("…and --count says 0", b.gate("--count")[1].strip(), "0"); b.close()
+
+    b = two_jobs(24, 6)
+    check("second job with 6 agents is refused", b.gate()[0], 3); b.close()
+
+    b = two_jobs(24, 23)
+    rc, out = b.gate()
+    check("second job with its own 23 agents passes", rc, 0)
+    check("…and reports 23, not 47", "23 sub-agents" in out, True); b.close()
+
+    b = two_jobs(24, 0, stamp=False)
+    check("no delivery stamp: falls back to since-boot (old behavior)", b.gate()[0], 0); b.close()
+
+    # complete.sh writes the stamp when the tx lands…
+    b = two_jobs(0, 23, stamp=False)
+    rc, sent, out = b.complete()
+    stamp = os.path.join(b.home, ".pipeline-gate-delivered")
+    check("delivery writes the stamp", os.path.isfile(stamp), True)
+    check("…so the SAME agents cannot deliver a second job", b.complete()[0], 3); b.close()
+
+    # …and not when it fails: the retry is the same job and keeps its agents.
+    b = Box(); b.session("live", 23)
+    with open(os.path.join(b.bin, "cast"), "w") as fh:
+        fh.write("#!/bin/bash\necho '{\"transactionHash\":\"0xabc\",\"status\":\"0x0\"}'\n")
+    b.complete()
+    check("failed tx: no stamp", os.path.isfile(os.path.join(b.home, ".pipeline-gate-delivered")), False)
+    check("…retry still passes the gate", b.gate()[0], 0); b.close()
+
+    b = Box(auditor=False); b.session("live", 0); b.complete()
+    check("builder VM: no stamp", os.path.isfile(os.path.join(b.home, ".pipeline-gate-delivered")), False)
+    b.close()
+
+    b = Box(); b.session("live", 23)
+    open(os.path.join(b.home, ".pipeline-gate-delivered"), "w").write(str(int(time.time()) + 86400))
+    check("a stamp from the future is ignored", b.gate()[0], 0); b.close()
+
+    b = Box(); b.session("live", 23)
+    open(os.path.join(b.home, ".pipeline-gate-delivered"), "w").write("garbage")
+    check("an unreadable stamp is ignored", b.gate()[0], 0); b.close()
+
+
 if __name__ == "__main__":
     test_gate()
+    test_per_job()
     test_complete()
     test_lens()
     if FAILED:

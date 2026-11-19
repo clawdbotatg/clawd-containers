@@ -285,8 +285,13 @@ stand between that and a client:
 - **In the VM — `scripts/leftclaw/pipeline_gate.py`**, called by
   `complete.sh` in auditor VMs only (marker `~/auditor.prompt.md`; builder /
   research / feature VMs and `host-auditor` are not gated). It counts
-  sub-agent spawns in Claude Code's own session log since boot and **refuses
-  `completeJob` under 20** (3 context + 5–8 checklist + 12 attack). No
+  sub-agent spawns in Claude Code's own session log **for this job** and
+  **refuses `completeJob` under 20** (3 context + 5–8 checklist + 12 attack).
+  "For this job" = since the later of boot and the VM's last delivery
+  (`complete.sh` stamps `~/.pipeline-gate-delivered` when the tx lands;
+  `lens_check.py` uses the same start). It was "since boot" until 2026-11-18,
+  when one session delivered three jobs and the third's gate read "70
+  sub-agents ran" — a later job with zero agents would have passed. No
   Solidity under `~/audits/<job>/` → not checked. A Solidity repo with a
   non-Solidity scope → `complete.sh … --not-solidity "<scope>"`, written
   on-chain. Unreadable log → fails open with a WARNING. Operator-only escape,

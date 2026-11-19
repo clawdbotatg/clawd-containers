@@ -15,12 +15,17 @@ one said so in its report; nothing stopped delivery. An instruction that
 failed that often is not a control. This is: the evidence is Claude Code's
 own session log, which the auditor does not write.
 
-What counts: sub-agent spawns since this VM booted — `Agent`/`Task` tool
-calls in the session transcripts under ~/.claude/projects, and the
-per-agent transcript files next to them. The larger of the two, so a tool
-rename in a CLI update cannot zero the count. A fresh VM is cloned per job,
-so "since boot" is "for this job"; sessions baked into the gold image are
-older than boot and ignored.
+What counts: sub-agent spawns FOR THIS JOB — `Agent`/`Task` tool calls in
+the session transcripts under ~/.claude/projects, and the per-agent
+transcript files next to them. The larger of the two, so a tool rename in a
+CLI update cannot zero the count. "For this job" = since the later of this
+VM's boot and the last delivery it made: complete.sh stamps
+~/.pipeline-gate-delivered when completeJob lands, and nothing older than
+that stamp counts. (Until 2026-11-18 this was "since boot", on the belief
+that a VM does one job. It does not — one session delivered 1248, 1249 and
+1250 back to back, and job 1250's gate read "70 sub-agents ran": a fourth
+job with zero agents would have passed.) Sessions baked into the gold image
+are older than boot and ignored.
 
 Deliberately NOT here: an override the auditor can pass. Small scope, a
 fix-review round, a tight clock — none of them is a reason. The two real
@@ -40,12 +45,14 @@ notes, scripts/leftclaw/delivery_summary.py) still catches a fast one.
 
 Tests: python3 tests/test_pipeline_gate.py
 """
+import datetime
 import glob
 import json
 import os
 import re
 import subprocess
 import sys
+import time
 
 MIN_AGENTS = int(os.environ.get("PIPELINE_MIN_AGENTS", "20"))
 HOME = os.path.expanduser("~")
@@ -69,8 +76,55 @@ def boot_time():
     return None
 
 
-def spawn_ids(path):
-    """tool_use ids of every sub-agent spawn in one session transcript."""
+STAMP = os.path.join(HOME, ".pipeline-gate-delivered")
+
+
+def job_start():
+    """Epoch seconds the current job's work began: boot, or the last
+    delivery this VM made, whichever is later. None = unknown (count all)."""
+    since = boot_time()
+    try:
+        last = float(open(STAMP).read().split()[0])
+    except (OSError, ValueError, IndexError):
+        return since
+    # A stamp from the future is a broken clock, not evidence — ignore it.
+    if last > time.time() + 60:
+        return since
+    return last if since is None else max(since, last)
+
+
+def line_time(d):
+    """Epoch seconds of one transcript line, or None."""
+    ts = d.get("timestamp")
+    if not isinstance(ts, str):
+        return None
+    try:
+        return datetime.datetime.fromisoformat(ts.replace("Z", "+00:00")).timestamp()
+    except ValueError:
+        return None
+
+
+def first_time(path):
+    """When a per-agent log STARTED (its first stamped line), else mtime."""
+    try:
+        with open(path, encoding="utf-8", errors="replace") as fh:
+            for i, line in enumerate(fh):
+                if i > 20:
+                    break
+                try:
+                    t = line_time(json.loads(line))
+                except Exception:
+                    continue
+                if t is not None:
+                    return t
+        return os.path.getmtime(path)
+    except OSError:
+        return None
+
+
+def spawn_ids(path, since=None):
+    """tool_use ids of every sub-agent spawn in one session transcript
+    (at or after `since`; a line with no timestamp counts)."""
     ids = set()
     try:
         with open(path, encoding="utf-8", errors="replace") as fh:
@@ -82,6 +136,9 @@ def spawn_ids(path):
                 except Exception:
                     continue
                 if d.get("type") != "assistant" or d.get("isSidechain"):
+                    continue
+                t = line_time(d)
+                if since is not None and t is not None and t < since:
                     continue
                 content = (d.get("message") or {}).get("content")
                 if not isinstance(content, list):
@@ -97,15 +154,23 @@ def spawn_ids(path):
 
 def count_agents():
     """(spawns, sessions_seen). spawns = max(tool calls, per-agent logs)."""
-    since = boot_time()
+    since = job_start()
     sessions = [p for p in glob.glob(os.path.join(PROJECTS, "*", "*.jsonl"))
                 if since is None or os.path.getmtime(p) >= since]
     calls = set()
     for p in sessions:
-        calls |= spawn_ids(p)
-    agent_logs = [p for p in glob.glob(os.path.join(PROJECTS, "*", "*", "subagents", "*.jsonl"))
-                  if since is None or os.path.getmtime(p) >= since]
-    return max(len(calls), len(agent_logs)), len(sessions)
+        calls |= spawn_ids(p, since)
+    return max(len(calls), len(agent_logs_since(since))), len(sessions)
+
+
+def agent_logs_since(since):
+    """Per-agent transcripts that STARTED at or after `since`."""
+    out = []
+    for p in glob.glob(os.path.join(PROJECTS, "*", "*", "subagents", "*.jsonl")):
+        t = first_time(p)
+        if since is None or (t is not None and t >= since):
+            out.append(p)
+    return out
 
 
 def has_solidity(job_id):
@@ -136,7 +201,7 @@ def main():
         print(f"pipeline gate: no Solidity under ~/audits/{job}/ — not checked ({n} sub-agents ran)")
         return 0
     if sessions == 0:
-        print("pipeline gate: WARNING — no session log found since boot under "
+        print("pipeline gate: WARNING — no session log found for this job under "
               "~/.claude/projects; cannot verify the pipeline ran. Letting delivery through.")
         return 0
     if n >= MIN_AGENTS:
@@ -146,7 +211,8 @@ def main():
     print(f"""
 REFUSED — job {job} is not delivered. The full audit pipeline has not run.
 
-This session's log shows {n} sub-agent(s) started. A full audit starts at
+This session's log shows {n} sub-agent(s) started for this job (agents
+run for an earlier job in this session do not count). A full audit starts at
 least {MIN_AGENTS}: 3 context agents (phase 0), 5-8 checklist agents (phase 1) and
 the 12 attack agents (phase 2, in waves of 3).
 

@@ -60,8 +60,17 @@ if [[ -f "$HOME/auditor.prompt.md" && -f "$HERE/pipeline_gate.py" && "${PIPELINE
   fi
 fi
 
-cast send "$CONTRACT" "completeJob(uint256,string)" "$1" "$2" \
+OUT="$(cast send "$CONTRACT" "completeJob(uint256,string)" "$1" "$2" \
   --rpc-url "$RPC" \
   --private-key "$PRIVATE_KEY" \
   --json \
-  | python3 -c 'import json,sys; d=json.load(sys.stdin); print("tx:", d.get("transactionHash")); print("status:", d.get("status"))'
+  | python3 -c 'import json,sys; d=json.load(sys.stdin); print("tx:", d.get("transactionHash")); print("status:", d.get("status"))')"
+printf '%s\n' "$OUT"
+
+# Delivered: the next job in this VM starts counting its agents from here
+# (pipeline_gate.py job_start). Only on a landed tx — a failed send is retried
+# for the SAME job and must keep its agents.
+case "$OUT" in
+  *"status: 0x1"*|*"status: 1"*)
+    [[ -f "$HOME/auditor.prompt.md" ]] && { date +%s > "$HOME/.pipeline-gate-delivered"; } 2>/dev/null || true ;;
+esac

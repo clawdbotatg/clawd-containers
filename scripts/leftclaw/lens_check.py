@@ -89,9 +89,7 @@ def read_agent(path):
 
 def check():
     import pipeline_gate as pg
-    since = pg.boot_time()
-    logs = [p for p in glob.glob(os.path.join(pg.PROJECTS, "*", "*", "subagents", "*.jsonl"))
-            if since is None or os.path.getmtime(p) >= since]
+    logs = pg.agent_logs_since(pg.job_start())   # this job's agents only
     seen, returned = set(), set()
     for p in logs:
         lens, ok = read_agent(p)
