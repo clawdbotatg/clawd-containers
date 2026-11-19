@@ -155,8 +155,12 @@ def spawn_ids(path, since=None):
 def count_agents():
     """(spawns, sessions_seen). spawns = max(tool calls, per-agent logs)."""
     since = job_start()
+    # Sessions are matched against BOOT, not the job start: "is there a log
+    # to read at all" must not turn into "no log" (which fails open) just
+    # because the session went quiet after the last delivery.
+    boot = boot_time()
     sessions = [p for p in glob.glob(os.path.join(PROJECTS, "*", "*.jsonl"))
-                if since is None or os.path.getmtime(p) >= since]
+                if boot is None or os.path.getmtime(p) >= boot]
     calls = set()
     for p in sessions:
         calls |= spawn_ids(p, since)
